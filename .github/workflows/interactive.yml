@@ -10,30 +10,36 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Desktop Environment & Chrome
+      - name: Install Desktop Environment & Tunnel Tool
         run: |
           sudo apt update
-          sudo apt install -y xfce4 xfce4-goodies novnc python3-websockify x11vnc xvfb google-chrome-stable
-          
+          sudo apt install -y xfce4 xfce4-goodies dbus-x11 novnc python3-websockify x11vnc xvfb google-chrome-stable
+          npm install -g localtunnel
+
       - name: Start Virtual Screen & VNC Server
         run: |
-          # 1. تشغيل شاشة وهمية بدقة Full HD
+          # 1. تشغيل الشاشة الوهمية بدقة Full HD والانتظار 3 ثوانٍ لتستقر
           Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 3
+          
           export DISPLAY=:99
           
-          # 2. تشغيل واجهة سطح المكتب XFCE
-          startxfce4 &
+          # 2. تشغيل واجهة سطح المكتب مع dbus
+          dbus-launch startxfce4 &
+          sleep 2
           
-          # 3. تشغيل سيرفر VNC للتحكم
+          # 3. تشغيل سيرفر VNC
           x11vnc -display :99 -forever -shared -nopw -rfbport 5900 &
+          sleep 2
           
-          # 4. تشغيل noVNC لتحويل التحكم إلى صفحة ويب
+          # 4. تشغيل noVNC على البورت 8080
           /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 8080 &
+          sleep 2
 
       - name: Create Web Tunnel & Print Live Link
         run: |
           echo "======================================================="
-          echo "جاري فتح رابط التحكم المباشر... انتظر بضعة ثوانٍ"
+          echo "جاري فتح رابط التحكم المباشر..."
           echo "======================================================="
-          # فتح نفق خارجي مجاني لإعطائك رابط ويب مباشر للتحكم
-          ssh -o StrictHostKeyChecking=no -R 80:localhost:8080 free@a.pinggy.io
+          # فتح نفق localtunnel على البورت 8080
+          npx localtunnel --port 8080
