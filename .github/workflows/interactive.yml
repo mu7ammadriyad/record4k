@@ -1,0 +1,39 @@
+name: Interactive Remote Browser (noVNC)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  remote-desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Desktop Environment & Chrome
+        run: |
+          sudo apt update
+          sudo apt install -y xfce4 xfce4-goodies novnc python3-websockify x11vnc xvfb google-chrome-stable
+          
+      - name: Start Virtual Screen & VNC Server
+        run: |
+          # 1. تشغيل شاشة وهمية بدقة Full HD
+          Xvfb :99 -screen 0 1920x1080x24 &
+          export DISPLAY=:99
+          
+          # 2. تشغيل واجهة سطح المكتب XFCE
+          startxfce4 &
+          
+          # 3. تشغيل سيرفر VNC للتحكم
+          x11vnc -display :99 -forever -shared -nopw -rfbport 5900 &
+          
+          # 4. تشغيل noVNC لتحويل التحكم إلى صفحة ويب
+          /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 8080 &
+
+      - name: Create Web Tunnel & Print Live Link
+        run: |
+          echo "======================================================="
+          echo "جاري فتح رابط التحكم المباشر... انتظر بضعة ثوانٍ"
+          echo "======================================================="
+          # فتح نفق خارجي مجاني لإعطائك رابط ويب مباشر للتحكم
+          ssh -o StrictHostKeyChecking=no -R 80:localhost:8080 free@a.pinggy.io
