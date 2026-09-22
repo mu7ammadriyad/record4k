@@ -1,0 +1,10 @@
+{
+  "name": "cloud-recorder",
+  "version": "1.0.0",
+  "scripts": {
+    "record": "node record.js"
+  },
+  "dependencies": {
+    "playwright": "^1.42.0"
+  }
+}
