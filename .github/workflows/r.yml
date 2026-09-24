@@ -1,4 +1,4 @@
-name: Remote SaaS Demo Computer
+name: Remote SaaS Demo Compute4r
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   remote-desktop:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     env:
@@ -21,6 +21,12 @@ jobs:
       SCREEN_WIDTH: "1920"
       SCREEN_HEIGHT: "1080"
       SESSION_MINUTES: ${{ inputs.session_minutes }}
+      XDG_CURRENT_DESKTOP: "GNOME"
+      XDG_SESSION_DESKTOP: "gnome"
+      XDG_SESSION_TYPE: "x11"
+      GDMSESSION: "gnome-xorg"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      MESA_LOADER_DRIVER_OVERRIDE: "llvmpipe"
 
     steps:
 
@@ -33,7 +39,8 @@ jobs:
           set -e
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-goodies dbus-x11 dbus-user-session x11-xserver-utils xvfb x11vnc ffmpeg curl wget git python3 python3-pip ca-certificates openssl pipewire pipewire-audio pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-gtk
+          sudo apt-get install -y gnome-shell gnome-session gnome-settings-daemon mutter dbus-x11 dbus-user-session x11-xserver-utils xserver-xorg-core xvfb x11vnc ffmpeg curl wget git python3 python3-pip python3-venv ca-certificates openssl mesa-utils mesa-vulkan-drivers libgl1-mesa-dri pipewire pipewire-audio pipewire-pulse wireplumber pulseaudio-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
+          echo "GNOME + PipeWire + GNOME ScreenCast portal installed."
 
       - name: Install Chromium
         shell: bash
@@ -62,6 +69,7 @@ jobs:
           set -e
           wget -q https://github.com/getopenscreen/openscreen/releases/download/v1.12.2/Openscreen-Linux-1.12.2.deb -O /tmp/openscreen.deb
           sudo apt-get install -y /tmp/openscreen.deb
+          command -v openscreen
           openscreen --version || true
 
       - name: Start Virtual Display
@@ -70,69 +78,121 @@ jobs:
           set -e
           Xvfb "$DISPLAY" -screen 0 "${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" -ac +extension GLX +extension RANDR +render -noreset > /tmp/xvfb.log 2>&1 &
           echo $! > /tmp/xvfb.pid
-          sleep 4
+          sleep 5
           xdpyinfo -display "$DISPLAY" | head -n 20
 
-      - name: Prepare Runtime and DBus
+      - name: Prepare Session Environment
         shell: bash
         run: |
           set -e
           export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export GDMSESSION=gnome-xorg
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
-          dbus-launch --sh-syntax --exit-with-session > /tmp/dbus.env
-          cat /tmp/dbus.env
-          source /tmp/dbus.env
+          echo "XDG_CURRENT_DESKTOP=GNOME" >> "$GITHUB_ENV"
+          echo "XDG_SESSION_DESKTOP=gnome" >> "$GITHUB_ENV"
+          echo "XDG_SESSION_TYPE=x11" >> "$GITHUB_ENV"
+          echo "GDMSESSION=gnome-xorg" >> "$GITHUB_ENV"
+          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
+          echo "MESA_LOADER_DRIVER_OVERRIDE=llvmpipe" >> "$GITHUB_ENV"
+          eval "$(dbus-launch --sh-syntax --exit-with-session)"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
+          echo "Session environment ready."
 
-      - name: Start XFCE
+      - name: Configure GNOME Portal
         shell: bash
         run: |
           set -e
           export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
-          xfce4-session > /tmp/xfce.log 2>&1 &
-          echo $! > /tmp/xfce.pid
-          sleep 10
-          echo "XFCE desktop started."
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
+          mkdir -p "$HOME/.config/xdg-desktop-portal"
+          cat > "$HOME/.config/xdg-desktop-portal/gnome-portals.conf" <<'EOF'
+          [preferred]
+          default=gnome;gtk;
+          org.freedesktop.impl.portal.ScreenCast=gnome;
+          org.freedesktop.impl.portal.RemoteDesktop=gnome;
+          EOF
+          echo "GNOME portal configuration:"
+          cat "$HOME/.config/xdg-desktop-portal/gnome-portals.conf"
+
+      - name: Start GNOME Desktop
+        shell: bash
+        run: |
+          set -e
+          export DISPLAY=:99
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export GDMSESSION=gnome-xorg
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+          export MUTTER_DEBUG_DISABLE_HW_CURSORS=1
+          gnome-session --session=gnome-xorg > /tmp/gnome-session.log 2>&1 &
+          echo $! > /tmp/gnome-session.pid
+          sleep 15
+          if pgrep -x gnome-shell >/dev/null; then
+            echo "GNOME Shell is running."
+          else
+            echo "GNOME Shell did not start automatically. Starting it manually..."
+            gnome-shell --x11 --replace > /tmp/gnome-shell.log 2>&1 &
+            echo $! > /tmp/gnome-shell.pid
+            sleep 15
+          fi
+          echo "GNOME processes:"
+          ps aux | grep -E "gnome-session|gnome-shell|mutter" | grep -v grep || true
 
       - name: Start PipeWire
         shell: bash
         run: |
           set -e
           export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
           pipewire > /tmp/pipewire.log 2>&1 &
           echo $! > /tmp/pipewire.pid
-          sleep 3
+          sleep 4
           wireplumber > /tmp/wireplumber.log 2>&1 &
           echo $! > /tmp/wireplumber.pid
           sleep 5
-          pactl info || true
+          echo "PipeWire:"
           ps aux | grep -E "pipewire|wireplumber" | grep -v grep || true
+          pactl info || true
 
-      - name: Start XDG Desktop Portal
+      - name: Start Desktop Portals
         shell: bash
         run: |
           set -e
           export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
-          mkdir -p "$HOME/.config/xdg-desktop-portal"
-          cat > "$HOME/.config/xdg-desktop-portal/portals.conf" <<'EOF'
-          [preferred]
-          default=gtk
-          EOF
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
           pkill xdg-desktop-portal || true
-          sleep 2
+          pkill xdg-desktop-portal-gnome || true
+          sleep 3
           /usr/libexec/xdg-desktop-portal > /tmp/xdg-portal.log 2>&1 &
-          echo $! > /tmp/portal.pid
-          sleep 5
+          echo $! > /tmp/xdg-portal.pid
+          sleep 3
+          /usr/libexec/xdg-desktop-portal-gnome > /tmp/xdg-portal-gnome.log 2>&1 &
+          echo $! > /tmp/xdg-portal-gnome.pid
+          sleep 8
+          echo "Portal processes:"
           ps aux | grep xdg-desktop-portal | grep -v grep || true
+          echo "Portal logs:"
+          tail -n 50 /tmp/xdg-portal.log || true
+          tail -n 50 /tmp/xdg-portal-gnome.log || true
 
-      - name: Start Website
+      - name: Start SaaS Website
         shell: bash
         run: |
           set -e
@@ -141,7 +201,7 @@ jobs:
           sleep 3
           curl -I http://127.0.0.1:8080
 
-      - name: Start Cloudflare Quick Tunnel
+      - name: Start Cloudflare SaaS Tunnel
         shell: bash
         run: |
           set -e
@@ -160,7 +220,7 @@ jobs:
           echo "PUBLIC_APP_URL=$PUBLIC_APP_URL" >> "$GITHUB_ENV"
           echo "SaaS URL: $PUBLIC_APP_URL"
 
-      - name: Start VNC
+      - name: Start VNC Server
         shell: bash
         run: |
           set -e
@@ -193,6 +253,7 @@ jobs:
           echo $! > /tmp/novnc.pid
           sleep 5
           curl -I http://127.0.0.1:6080/vnc.html
+          echo "noVNC started."
 
       - name: Start Cloudflare Remote Desktop Tunnel
         shell: bash
@@ -211,17 +272,23 @@ jobs:
             exit 1
           fi
           echo "REMOTE_URL=$REMOTE_URL" >> "$GITHUB_ENV"
-          echo "Remote Desktop URL: $REMOTE_URL"
+          echo "Remote URL: $REMOTE_URL"
 
       - name: Launch OpenScreen
         shell: bash
         run: |
           set -e
           export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
           openscreen > /tmp/openscreen.log 2>&1 &
           echo $! > /tmp/openscreen.pid
-          sleep 12
+          sleep 15
+          echo "OpenScreen process:"
           ps aux | grep -i openscreen | grep -v grep || true
 
       - name: Launch Chromium
@@ -229,48 +296,84 @@ jobs:
         run: |
           set -e
           export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
           chromium --no-sandbox --disable-dev-shm-usage --window-size=1920,1080 --start-maximized "$PUBLIC_APP_URL" > /tmp/chromium.log 2>&1 &
           echo $! > /tmp/chromium.pid
-          sleep 8
+          sleep 10
+          echo "Chromium started."
 
-      - name: Show Connection Information
+      - name: Show Remote Computer Information
         shell: bash
         run: |
           {
             echo "# 🖥️ Remote SaaS Demo Computer"
             echo
-            echo "## Remote Desktop"
+            echo "## 🌐 Remote Desktop"
             echo
             echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
             echo
-            echo "## VNC Password"
+            echo "## 🔐 VNC Password"
             echo
             echo "\`${VNC_PASSWORD}\`"
             echo
-            echo "## SaaS Product URL"
+            echo "## 🌐 SaaS Product"
             echo
             echo "${PUBLIC_APP_URL}"
             echo
-            echo "## Resolution"
+            echo "## 🖥️ Resolution"
             echo
-            echo "1920 x 1080"
+            echo "1920 × 1080"
             echo
-            echo "## Session"
+            echo "## 🎥 How to use"
+            echo
+            echo "Open the Remote Desktop URL."
+            echo "Enter the VNC password."
+            echo "Control the virtual computer with your mouse and keyboard."
+            echo "OpenScreen is already running inside the virtual computer."
+            echo "Start recording from OpenScreen."
+            echo "When the ScreenCast picker appears, choose the entire screen and confirm."
+            echo
+            echo "## ⏱️ Session"
             echo
             echo "${SESSION_MINUTES} minutes"
-            echo
-            echo "## Usage"
-            echo
-            echo "Open the Remote Desktop URL from your computer, enter the VNC password, then control the virtual computer with your mouse and keyboard."
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo
           echo "=============================================="
           echo "REMOTE COMPUTER READY"
           echo "=============================================="
-          echo "Desktop: ${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
-          echo "Password: ${VNC_PASSWORD}"
-          echo "SaaS: ${PUBLIC_APP_URL}"
+          echo "Remote Desktop:"
+          echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
+          echo
+          echo "VNC Password:"
+          echo "${VNC_PASSWORD}"
+          echo
+          echo "SaaS Product:"
+          echo "${PUBLIC_APP_URL}"
+          echo
+          echo "Resolution: 1920x1080"
           echo "=============================================="
+
+      - name: Verify ScreenCast Portal
+        shell: bash
+        run: |
+          set -e
+          export DISPLAY=:99
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=gnome
+          export XDG_SESSION_TYPE=x11
+          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
+          echo "Installed portal backends:"
+          find /usr/share/xdg-desktop-portal/portals -maxdepth 1 -type f -print | sort || true
+          echo
+          echo "GNOME portal:"
+          test -f /usr/share/xdg-desktop-portal/portals/gnome.portal && cat /usr/share/xdg-desktop-portal/portals/gnome.portal || true
+          echo
+          echo "Portal processes:"
+          ps aux | grep xdg-desktop-portal | grep -v grep || true
 
       - name: Keep Computer Online
         shell: bash
@@ -293,10 +396,12 @@ jobs:
         run: |
           mkdir -p logs
           cp /tmp/xvfb.log logs/ 2>/dev/null || true
-          cp /tmp/xfce.log logs/ 2>/dev/null || true
+          cp /tmp/gnome-session.log logs/ 2>/dev/null || true
+          cp /tmp/gnome-shell.log logs/ 2>/dev/null || true
           cp /tmp/pipewire.log logs/ 2>/dev/null || true
           cp /tmp/wireplumber.log logs/ 2>/dev/null || true
           cp /tmp/xdg-portal.log logs/ 2>/dev/null || true
+          cp /tmp/xdg-portal-gnome.log logs/ 2>/dev/null || true
           cp /tmp/x11vnc.log logs/ 2>/dev/null || true
           cp /tmp/novnc.log logs/ 2>/dev/null || true
           cp /tmp/cloudflare-app.log logs/ 2>/dev/null || true
@@ -326,7 +431,10 @@ jobs:
           kill "$(cat /tmp/cloudflared-remote.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/pipewire.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/wireplumber.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/xfce.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/xdg-portal.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/xdg-portal-gnome.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/gnome-session.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/gnome-shell.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/xvfb.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/portal.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/webserver.pid 2>/dev/null)" 2>/dev/null || true
+          echo "Cleanup complete."
