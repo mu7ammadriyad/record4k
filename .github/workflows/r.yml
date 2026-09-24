@@ -344,29 +344,24 @@ jobs:
 
           websockify --version
 
-
-      # ============================================================
-      # 14) Start noVNC
-      # ============================================================
-      - name: Start noVNC
+      - name: Install noVNC
         shell: bash
         run: |
           set -e
 
-          websockify \
-            --web=/opt/noVNC \
-            6080 \
-            localhost:5900 \
-            > /tmp/novnc.log 2>&1 &
+          sudo rm -rf /opt/noVNC
 
-          echo $! > /tmp/novnc.pid
+          sudo git clone \
+            --depth 1 \
+            https://github.com/novnc/noVNC.git \
+            /opt/noVNC
 
-          sleep 5
+          python3 -m pip install --break-system-packages websockify
 
-          curl -I http://127.0.0.1:6080/vnc.html
+          websockify --help > /dev/null
 
-          echo "noVNC is running."
-
+          echo "websockify installed successfully."
+    
 
       # ============================================================
       # 15) Start Cloudflare Quick Tunnel
