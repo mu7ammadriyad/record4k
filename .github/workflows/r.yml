@@ -1,10 +1,11 @@
+```yaml
 name: Remote SaaS Demo Computer
 
 on:
   workflow_dispatch:
     inputs:
       session_minutes:
-        description: "مدة الجلسة بالدقائق"
+        description: "مدة تشغيل الكمبيوتر الافتراضي بالدقائق"
         required: true
         default: "60"
 
@@ -14,7 +15,6 @@ permissions:
 jobs:
   remote-desktop:
     runs-on: ubuntu-latest
-
     timeout-minutes: 350
 
     env:
@@ -25,534 +25,274 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # 1) Checkout
-      # ============================================================
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ============================================================
-      # 2) Install Desktop + Remote Desktop + Recording Tools
-      # ============================================================
-      - name: Install desktop and recording environment
+      - name: Install Desktop and Tools
         shell: bash
         run: |
           set -e
-
           export DEBIAN_FRONTEND=noninteractive
-
           sudo apt-get update
+          sudo apt-get install -y xfce4 xfce4-goodies dbus-x11 dbus-user-session x11-xserver-utils xvfb x11vnc ffmpeg curl wget git python3 python3-pip ca-certificates openssl pipewire pipewire-audio pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-gtk
 
-          sudo apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            dbus-x11 \
-            dbus-user-session \
-            x11-xserver-utils \
-            xvfb \
-            x11vnc \
-            ffmpeg \
-            curl \
-            wget \
-            git \
-            python3 \
-            python3-pip \
-            ca-certificates \
-            pipewire \
-            pipewire-audio \
-            wireplumber \
-            xdg-desktop-portal \
-            xdg-desktop-portal-gtk \
-            xdg-desktop-portal-xapp \
-            chromium-browser || true
-
-          echo "Desktop packages installed."
-
-
-      # ============================================================
-      # 3) Install Chromium if package name differs
-      # ============================================================
-      - name: Ensure Chromium exists
+      - name: Install Chromium
         shell: bash
         run: |
           set -e
-
           if command -v chromium >/dev/null 2>&1; then
-            echo "Chromium found:"
             chromium --version
-            exit 0
-          fi
-
-          if command -v chromium-browser >/dev/null 2>&1; then
-            echo "Chromium-browser found:"
+          elif command -v chromium-browser >/dev/null 2>&1; then
             chromium-browser --version
-            exit 0
+          else
+            sudo apt-get install -y chromium
+            chromium --version
           fi
 
-          sudo apt-get install -y chromium
-
-          chromium --version || true
-
-
-      # ============================================================
-      # 4) Install Cloudflared
-      # ============================================================
       - name: Install Cloudflared
         shell: bash
         run: |
           set -e
-
-          wget -q \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
-            -O /tmp/cloudflared.deb
-
-          sudo dpkg -i /tmp/cloudflared.deb || true
-
-          sudo apt-get install -f -y
-
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
           cloudflared --version
 
-
-      # ============================================================
-      # 5) Install latest OpenScreen stable release
-      # ============================================================
       - name: Install OpenScreen
         shell: bash
         run: |
           set -e
-
-          OPENS_URL="https://github.com/getopenscreen/openscreen/releases/download/v1.12.2/Openscreen-Linux-1.12.2.deb"
-
-          echo "Downloading OpenScreen..."
-
-          wget -q \
-            "$OPENS_URL" \
-            -O /tmp/openscreen.deb
-
+          wget -q https://github.com/getopenscreen/openscreen/releases/download/v1.12.2/Openscreen-Linux-1.12.2.deb -O /tmp/openscreen.deb
           sudo apt-get install -y /tmp/openscreen.deb
-
-          echo "OpenScreen installed."
-
           openscreen --version || true
 
-
-      # ============================================================
-      # 6) Start virtual 1920x1080 screen
-      # ============================================================
-      - name: Start virtual display
+      - name: Start Virtual Display
         shell: bash
         run: |
           set -e
-
-          Xvfb "$DISPLAY" \
-            -screen 0 "${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" \
-            -ac \
-            +extension GLX \
-            +extension RANDR \
-            +render \
-            -noreset \
-            > /tmp/xvfb.log 2>&1 &
-
+          Xvfb "$DISPLAY" -screen 0 "${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" -ac +extension GLX +extension RANDR +render -noreset > /tmp/xvfb.log 2>&1 &
           echo $! > /tmp/xvfb.pid
-
           sleep 4
+          xdpyinfo -display "$DISPLAY" | head -n 20
 
-          echo "DISPLAY=$DISPLAY"
-
-          xdpyinfo -display "$DISPLAY" | head -n 30
-
-
-      # ============================================================
-      # 7) Start D-Bus user session
-      # ============================================================
-      - name: Start D-Bus session
+      - name: Prepare Runtime and DBus
         shell: bash
         run: |
           set -e
-
           export DISPLAY=:99
-
-          mkdir -p "$HOME/.config"
-
-          dbus-launch \
-            --sh-syntax \
-            --exit-with-session \
-            > /tmp/dbus-env
-
-          cat /tmp/dbus-env
-
-          source /tmp/dbus-env
-
+          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          dbus-launch --sh-syntax --exit-with-session > /tmp/dbus.env
+          cat /tmp/dbus.env
+          source /tmp/dbus.env
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
 
-
-      # ============================================================
-      # 8) Start XFCE desktop
-      # ============================================================
-      - name: Start XFCE desktop
+      - name: Start XFCE
         shell: bash
         run: |
           set -e
-
           export DISPLAY=:99
-
-          startxfce4 \
-            > /tmp/xfce.log 2>&1 &
-
+          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          xfce4-session > /tmp/xfce.log 2>&1 &
           echo $! > /tmp/xfce.pid
-
           sleep 10
+          echo "XFCE desktop started."
 
-          echo "XFCE started."
-
-
-      # ============================================================
-      # 9) Start PipeWire / WirePlumber
-      # ============================================================
       - name: Start PipeWire
         shell: bash
         run: |
           set -e
-
           export DISPLAY=:99
-
-          pipewire \
-            > /tmp/pipewire.log 2>&1 &
-
+          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          pipewire > /tmp/pipewire.log 2>&1 &
           echo $! > /tmp/pipewire.pid
-
           sleep 3
-
-          wireplumber \
-            > /tmp/wireplumber.log 2>&1 &
-
+          wireplumber > /tmp/wireplumber.log 2>&1 &
           echo $! > /tmp/wireplumber.pid
-
           sleep 5
-
-          echo "PipeWire:"
+          pactl info || true
           ps aux | grep -E "pipewire|wireplumber" | grep -v grep || true
 
-
-      # ============================================================
-      # 10) Configure portal preference
-      # ============================================================
-      - name: Configure desktop portal
+      - name: Start XDG Desktop Portal
         shell: bash
         run: |
           set -e
-
+          export DISPLAY=:99
+          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
           mkdir -p "$HOME/.config/xdg-desktop-portal"
-
           cat > "$HOME/.config/xdg-desktop-portal/portals.conf" <<'EOF'
           [preferred]
           default=gtk
           EOF
-
-          echo "Portal configuration created."
-
           pkill xdg-desktop-portal || true
-
-          sleep 3
-
-          /usr/libexec/xdg-desktop-portal \
-            > /tmp/xdg-portal.log 2>&1 &
-
+          sleep 2
+          /usr/libexec/xdg-desktop-portal > /tmp/xdg-portal.log 2>&1 &
           echo $! > /tmp/portal.pid
-
           sleep 5
-
-          echo "Portal process:"
           ps aux | grep xdg-desktop-portal | grep -v grep || true
 
-
-      # ============================================================
-      # 11) Create VNC password
-      # ============================================================
-      - name: Create VNC password
+      - name: Start Website
         shell: bash
         run: |
           set -e
+          python3 -m http.server 8080 --bind 127.0.0.1 > /tmp/webserver.log 2>&1 &
+          echo $! > /tmp/webserver.pid
+          sleep 3
+          curl -I http://127.0.0.1:8080
 
-          # 8-character VNC password.
-          VNC_PASSWORD="$(openssl rand -hex 4)"
-
-          mkdir -p "$HOME/.vnc"
-
-          x11vnc \
-            -storepasswd \
-            "$VNC_PASSWORD" \
-            "$HOME/.vnc/passwd"
-
-          chmod 600 "$HOME/.vnc/passwd"
-
-          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
-
-          echo "VNC password generated."
-
-
-      # ============================================================
-      # 12) Start x11vnc
-      # ============================================================
-      - name: Start VNC server
-        shell: bash
-        run: |
-          set -e
-
-          export DISPLAY=:99
-
-          x11vnc \
-            -display "$DISPLAY" \
-            -rfbport 5900 \
-            -rfbauth "$HOME/.vnc/passwd" \
-            -forever \
-            -shared \
-            -noxdamage \
-            -noxfixes \
-            -noxrecord \
-            -repeat \
-            -noshm \
-            -wait 5 \
-            -defer 5 \
-            > /tmp/x11vnc.log 2>&1 &
-
-          echo $! > /tmp/x11vnc.pid
-
-          sleep 5
-
-          echo "VNC server started."
-
-
-      # ============================================================
-      # 13) Install noVNC + websockify
-      # ============================================================
-      - name: Install noVNC
-        shell: bash
-        run: |
-          set -e
-
-          sudo rm -rf /opt/noVNC
-
-          sudo git clone \
-            --depth 1 \
-            https://github.com/novnc/noVNC.git \
-            /opt/noVNC
-
-          python3 -m pip install --break-system-packages websockify
-
-          websockify --version
-
-      - name: Install noVNC
-        shell: bash
-        run: |
-          set -e
-
-          sudo rm -rf /opt/noVNC
-
-          sudo git clone \
-            --depth 1 \
-            https://github.com/novnc/noVNC.git \
-            /opt/noVNC
-
-          python3 -m pip install --break-system-packages websockify
-
-          websockify --help > /dev/null
-
-          echo "websockify installed successfully."
-    
-
-      # ============================================================
-      # 15) Start Cloudflare Quick Tunnel
-      # ============================================================
       - name: Start Cloudflare Quick Tunnel
         shell: bash
         run: |
           set -e
-
-          cloudflared tunnel \
-            --no-autoupdate \
-            --url http://127.0.0.1:6080 \
-            > /tmp/cloudflare.log 2>&1 &
-
-          echo $! > /tmp/cloudflared.pid
-
-          echo "Waiting for Cloudflare URL..."
-
-          PUBLIC_URL=""
-
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080 > /tmp/cloudflare-app.log 2>&1 &
+          echo $! > /tmp/cloudflared-app.pid
+          PUBLIC_APP_URL=""
           for i in $(seq 1 60); do
-
-            PUBLIC_URL=$(
-              grep -oE \
-              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
-              /tmp/cloudflare.log \
-              | head -n 1 || true
-            )
-
-            if [ -n "$PUBLIC_URL" ]; then
-              break
-            fi
-
+            PUBLIC_APP_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cloudflare-app.log | head -n 1 || true)
+            [ -n "$PUBLIC_APP_URL" ] && break
             sleep 1
-
           done
-
-          if [ -z "$PUBLIC_URL" ]; then
-            echo "Cloudflare URL was not found."
-            cat /tmp/cloudflare.log
+          if [ -z "$PUBLIC_APP_URL" ]; then
+            cat /tmp/cloudflare-app.log
             exit 1
           fi
+          echo "PUBLIC_APP_URL=$PUBLIC_APP_URL" >> "$GITHUB_ENV"
+          echo "SaaS URL: $PUBLIC_APP_URL"
 
-          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+      - name: Start VNC
+        shell: bash
+        run: |
+          set -e
+          export DISPLAY=:99
+          VNC_PASSWORD="$(openssl rand -hex 4)"
+          mkdir -p "$HOME/.vnc"
+          x11vnc -storepasswd "$VNC_PASSWORD" "$HOME/.vnc/passwd"
+          chmod 600 "$HOME/.vnc/passwd"
+          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
+          x11vnc -display :99 -rfbport 5900 -rfbauth "$HOME/.vnc/passwd" -forever -shared -noxdamage -noxfixes -repeat -noshm -wait 5 -defer 5 > /tmp/x11vnc.log 2>&1 &
+          echo $! > /tmp/x11vnc.pid
+          sleep 5
+          echo "VNC server started."
 
-          echo "============================================="
-          echo "CLOUDFLARE URL:"
-          echo "$PUBLIC_URL"
-          echo "============================================="
+      - name: Install noVNC
+        shell: bash
+        run: |
+          set -e
+          sudo rm -rf /opt/noVNC
+          sudo git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC
+          python3 -m pip install --break-system-packages websockify
+          websockify --help > /dev/null
+          echo "websockify installed successfully."
 
+      - name: Start noVNC
+        shell: bash
+        run: |
+          set -e
+          websockify --web=/opt/noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
+          echo $! > /tmp/novnc.pid
+          sleep 5
+          curl -I http://127.0.0.1:6080/vnc.html
 
-      # ============================================================
-      # 16) OpenScreen desktop application
-      # ============================================================
+      - name: Start Cloudflare Remote Desktop Tunnel
+        shell: bash
+        run: |
+          set -e
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > /tmp/cloudflare-remote.log 2>&1 &
+          echo $! > /tmp/cloudflared-remote.pid
+          REMOTE_URL=""
+          for i in $(seq 1 60); do
+            REMOTE_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cloudflare-remote.log | head -n 1 || true)
+            [ -n "$REMOTE_URL" ] && break
+            sleep 1
+          done
+          if [ -z "$REMOTE_URL" ]; then
+            cat /tmp/cloudflare-remote.log
+            exit 1
+          fi
+          echo "REMOTE_URL=$REMOTE_URL" >> "$GITHUB_ENV"
+          echo "Remote Desktop URL: $REMOTE_URL"
+
       - name: Launch OpenScreen
         shell: bash
         run: |
           set -e
-
           export DISPLAY=:99
-
-          echo "Launching OpenScreen..."
-
-          openscreen \
-            > /tmp/openscreen.log 2>&1 &
-
+          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          openscreen > /tmp/openscreen.log 2>&1 &
           echo $! > /tmp/openscreen.pid
-
           sleep 12
-
-          echo "OpenScreen process:"
           ps aux | grep -i openscreen | grep -v grep || true
 
-
-      # ============================================================
-      # 17) Open Chromium
-      # ============================================================
       - name: Launch Chromium
         shell: bash
         run: |
           set -e
-
           export DISPLAY=:99
-
-          chromium \
-            --no-sandbox \
-            --disable-dev-shm-usage \
-            --disable-gpu \
-            --window-size=1920,1080 \
-            --start-maximized \
-            about:blank \
-            > /tmp/chromium.log 2>&1 &
-
+          export XDG_RUNTIME_DIR="/tmp/runtime-${UID}"
+          chromium --no-sandbox --disable-dev-shm-usage --window-size=1920,1080 --start-maximized "$PUBLIC_APP_URL" > /tmp/chromium.log 2>&1 &
           echo $! > /tmp/chromium.pid
-
           sleep 8
 
-
-      # ============================================================
-      # 18) Show connection information
-      # ============================================================
-      - name: Show remote computer information
+      - name: Show Connection Information
         shell: bash
         run: |
           {
             echo "# 🖥️ Remote SaaS Demo Computer"
             echo
-            echo "## 🌐 Open this URL"
+            echo "## Remote Desktop"
             echo
-            echo "${PUBLIC_URL}/vnc.html?autoconnect=true&resize=scale"
+            echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
             echo
-            echo "## 🔐 VNC Password"
+            echo "## VNC Password"
             echo
             echo "\`${VNC_PASSWORD}\`"
             echo
-            echo "## 🖥️ Resolution"
+            echo "## SaaS Product URL"
             echo
-            echo "1920 × 1080"
+            echo "${PUBLIC_APP_URL}"
             echo
-            echo "## ⏱️ Session"
+            echo "## Resolution"
+            echo
+            echo "1920 x 1080"
+            echo
+            echo "## Session"
             echo
             echo "${SESSION_MINUTES} minutes"
             echo
-            echo "## 🎥 What you can do"
+            echo "## Usage"
             echo
-            echo "1. Open the URL above."
-            echo "2. Enter the VNC password."
-            echo "3. You now control the GitHub virtual computer."
-            echo "4. Open your SaaS website in Chromium."
-            echo "5. Move the mouse and use the keyboard normally."
-            echo "6. Use OpenScreen inside the virtual desktop."
-            echo
-            echo "## ⚠️ Security"
-            echo
-            echo "This is a temporary Quick Tunnel for a GitHub Actions session."
+            echo "Open the Remote Desktop URL from your computer, enter the VNC password, then control the virtual computer with your mouse and keyboard."
           } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "============================================="
+          echo "=============================================="
           echo "REMOTE COMPUTER READY"
-          echo "============================================="
-          echo
-          echo "URL:"
-          echo "${PUBLIC_URL}/vnc.html?autoconnect=true&resize=scale"
-          echo
-          echo "PASSWORD:"
-          echo "${VNC_PASSWORD}"
-          echo
-          echo "============================================="
+          echo "=============================================="
+          echo "Desktop: ${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
+          echo "Password: ${VNC_PASSWORD}"
+          echo "SaaS: ${PUBLIC_APP_URL}"
+          echo "=============================================="
 
-
-      # ============================================================
-      # 19) Keep the virtual computer alive
-      # ============================================================
-      - name: Keep remote computer alive
+      - name: Keep Computer Online
         shell: bash
         run: |
           set -e
-
-          MINUTES="$SESSION_MINUTES"
-
-          if ! [[ "$MINUTES" =~ ^[0-9]+$ ]]; then
-            echo "Invalid session_minutes"
-            exit 1
-          fi
-
-          SECONDS=$((MINUTES * 60))
-
-          echo "Remote computer will stay online for ${MINUTES} minutes."
-
-          for ((i=1; i<=SECONDS; i++)); do
-
+          MINUTES="${SESSION_MINUTES:-60}"
+          [[ "$MINUTES" =~ ^[0-9]+$ ]] || { echo "Invalid session_minutes"; exit 1; }
+          TOTAL_SECONDS=$((MINUTES * 60))
+          echo "Remote computer is online for ${MINUTES} minutes."
+          for ((i=1; i<=TOTAL_SECONDS; i++)); do
             sleep 1
-
             if (( i % 30 == 0 )); then
-              REMAINING=$((SECONDS - i))
-
-              echo "Remaining: ${REMAINING}s"
+              echo "Remaining: $((TOTAL_SECONDS-i)) seconds"
             fi
-
           done
 
-
-      # ============================================================
-      # 20) Save logs
-      # ============================================================
-      - name: Save diagnostic logs
+      - name: Save Logs
         if: always()
         shell: bash
         run: |
           mkdir -p logs
-
           cp /tmp/xvfb.log logs/ 2>/dev/null || true
           cp /tmp/xfce.log logs/ 2>/dev/null || true
           cp /tmp/pipewire.log logs/ 2>/dev/null || true
@@ -560,14 +300,13 @@ jobs:
           cp /tmp/xdg-portal.log logs/ 2>/dev/null || true
           cp /tmp/x11vnc.log logs/ 2>/dev/null || true
           cp /tmp/novnc.log logs/ 2>/dev/null || true
-          cp /tmp/cloudflare.log logs/ 2>/dev/null || true
+          cp /tmp/cloudflare-app.log logs/ 2>/dev/null || true
+          cp /tmp/cloudflare-remote.log logs/ 2>/dev/null || true
           cp /tmp/openscreen.log logs/ 2>/dev/null || true
           cp /tmp/chromium.log logs/ 2>/dev/null || true
+          cp /tmp/webserver.log logs/ 2>/dev/null || true
 
-      # ============================================================
-      # 21) Upload logs
-      # ============================================================
-      - name: Upload logs
+      - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -576,10 +315,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-
-      # ============================================================
-      # 22) Cleanup
-      # ============================================================
       - name: Cleanup
         if: always()
         shell: bash
@@ -588,11 +323,12 @@ jobs:
           kill "$(cat /tmp/chromium.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/novnc.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/x11vnc.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/cloudflared.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/cloudflared-app.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/cloudflared-remote.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/pipewire.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/wireplumber.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/xfce.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/xvfb.pid 2>/dev/null)" 2>/dev/null || true
-
-          echo "Cleanup complete."
-
+          kill "$(cat /tmp/portal.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/webserver.pid 2>/dev/null)" 2>/dev/null || true
+```
