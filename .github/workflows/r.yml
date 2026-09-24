@@ -1,4 +1,3 @@
-```yaml
 name: Remote SaaS Demo Computer
 
 on:
@@ -331,4 +330,3 @@ jobs:
           kill "$(cat /tmp/xvfb.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/portal.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/webserver.pid 2>/dev/null)" 2>/dev/null || true
-```
