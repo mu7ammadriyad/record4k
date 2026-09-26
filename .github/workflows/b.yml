@@ -1,0 +1,662 @@
+name: Professional SaaS Screen Recorder2
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: "رابط موقع SaaS الذي سيتم فتحه"
+        required: true
+        default: "https://example.com"
+      session_minutes:
+        description: "أقصى مدة للجلسة فقط - ليست مدة التسجيل"
+        required: true
+        default: "120"
+      width:
+        description: "عرض الشاشة"
+        required: true
+        default: "2560"
+      height:
+        description: "ارتفاع الشاشة"
+        required: true
+        default: "1440"
+      fps:
+        description: "FPS"
+        required: true
+        default: "60"
+
+permissions:
+  contents: read
+
+jobs:
+  recorder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    env:
+      DISPLAY: ":99"
+      WIDTH: ${{ inputs.width }}
+      HEIGHT: ${{ inputs.height }}
+      FPS: ${{ inputs.fps }}
+      SITE_URL: ${{ inputs.site_url }}
+      SESSION_MINUTES: ${{ inputs.session_minutes }}
+      RECORDING_FILE: "${{ github.workspace }}/recording.mp4"
+      XCURSOR_SIZE: "64"
+      XCURSOR_THEME: "Adwaita"
+
+    steps:
+      - name: Install Stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            x11vnc \
+            novnc \
+            websockify \
+            nginx \
+            xdotool \
+            x11-utils \
+            x11-xserver-utils \
+            xcursor-themes \
+            ffmpeg \
+            chromium \
+            python3 \
+            curl \
+            wget \
+            openssl \
+            ca-certificates
+          chromium --version
+          ffmpeg -version | head -n 1
+          websockify --version 2>&1 || true
+          nginx -v
+          test -f /usr/share/novnc/vnc.html
+
+      - name: Prepare Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/recorder /tmp/chromium-profile
+          mkdir -p /tmp/recorder /tmp/chromium-profile
+          rm -f "${RECORDING_FILE}"
+
+      - name: Start Virtual Display
+        shell: bash
+        run: |
+          set -euo pipefail
+          Xvfb "${DISPLAY}" \
+            -screen 0 "${WIDTH}x${HEIGHT}x24" \
+            -ac \
+            +extension GLX \
+            +extension RANDR \
+            +render \
+            -noreset \
+            > /tmp/recorder/xvfb.log 2>&1 &
+          echo $! > /tmp/recorder/xvfb.pid
+          sleep 3
+          DISPLAY="${DISPLAY}" xdpyinfo | grep dimensions
+          DISPLAY="${DISPLAY}" xrandr || true
+
+      - name: Start Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DISPLAY="${DISPLAY}"
+          export XCURSOR_SIZE="${XCURSOR_SIZE}"
+          export XCURSOR_THEME="${XCURSOR_THEME}"
+          chromium \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-session-crashed-bubble \
+            --disable-infobars \
+            --disable-translate \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-features=Translate,MediaRouter \
+            --force-device-scale-factor=1 \
+            --kiosk \
+            --start-fullscreen \
+            --window-position=0,0 \
+            --window-size="${WIDTH},${HEIGHT}" \
+            --user-data-dir=/tmp/chromium-profile \
+            "${SITE_URL}" \
+            > /tmp/recorder/chromium.log 2>&1 &
+          echo $! > /tmp/recorder/chromium.pid
+          for i in $(seq 1 45); do
+            if DISPLAY="${DISPLAY}" xdotool search --onlyvisible --class chromium >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          sleep 8
+          DISPLAY="${DISPLAY}" xdotool mousemove 5 5
+
+      - name: Start VNC Server
+        shell: bash
+        run: |
+          set -euo pipefail
+          VNC_PASSWORD="$(openssl rand -hex 8)"
+          x11vnc -storepasswd "${VNC_PASSWORD}" /tmp/recorder/vnc-pass
+          chmod 600 /tmp/recorder/vnc-pass
+          echo "VNC_PASSWORD=${VNC_PASSWORD}" >> "${GITHUB_ENV}"
+          export DISPLAY="${DISPLAY}"
+          export XCURSOR_SIZE="${XCURSOR_SIZE}"
+          x11vnc \
+            -display "${DISPLAY}" \
+            -rfbport 5900 \
+            -rfbauth /tmp/recorder/vnc-pass \
+            -localhost \
+            -forever \
+            -shared \
+            -noxdamage \
+            -repeat \
+            -noshm \
+            -wait 5 \
+            -defer 5 \
+            > /tmp/recorder/x11vnc.log 2>&1 &
+          echo $! > /tmp/recorder/x11vnc.pid
+          sleep 5
+          kill -0 "$(cat /tmp/recorder/x11vnc.pid)"
+
+      - name: Start noVNC
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup websockify \
+            --web=/usr/share/novnc \
+            6080 \
+            127.0.0.1:5900 \
+            > /tmp/recorder/novnc.log 2>&1 < /dev/null &
+          echo $! > /tmp/recorder/novnc.pid
+          sleep 5
+          curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null
+
+      - name: Create Recording API
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/recorder/server.py <<'PY'
+          import json
+          import os
+          import signal
+          import subprocess
+          import threading
+          import time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          HOST = "127.0.0.1"
+          PORT = 8090
+          DISPLAY = os.environ.get("DISPLAY", ":99")
+          WIDTH = int(os.environ.get("WIDTH", "2560"))
+          HEIGHT = int(os.environ.get("HEIGHT", "1440"))
+          FPS = int(os.environ.get("FPS", "60"))
+          OUTPUT = os.environ["RECORDING_FILE"]
+          TOKEN = os.environ["RECORD_API_TOKEN"]
+          LOGFILE = "/tmp/recorder/ffmpeg.log"
+
+          state_lock = threading.RLock()
+          ffmpeg_process = None
+          started_at = None
+          status = "idle"
+          last_error = None
+          final_info = None
+
+          def now():
+              return time.time()
+
+          def auth_ok(handler):
+              value = handler.headers.get("Authorization", "")
+              return value == f"Bearer {TOKEN}"
+
+          def send_json(handler, code, payload):
+              body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              handler.send_response(code)
+              handler.send_header("Content-Type", "application/json; charset=utf-8")
+              handler.send_header("Content-Length", str(len(body)))
+              handler.send_header("Cache-Control", "no-store")
+              handler.end_headers()
+              handler.wfile.write(body)
+
+          def file_info():
+              global final_info
+              if not os.path.exists(OUTPUT):
+                  return None
+              size = os.path.getsize(OUTPUT)
+              if size < 100_000:
+                  return None
+              cmd = [
+                  "ffprobe", "-v", "error", "-select_streams", "v:0",
+                  "-show_entries", "stream=codec_name,width,height,avg_frame_rate,pix_fmt,duration",
+                  "-of", "json", OUTPUT
+              ]
+              result = subprocess.run(cmd, capture_output=True, text=True)
+              if result.returncode != 0:
+                  return None
+              try:
+                  data = json.loads(result.stdout)
+                  stream = (data.get("streams") or [None])[0]
+                  if not stream:
+                      return None
+                  rate = stream.get("avg_frame_rate", "0/1")
+                  num, den = rate.split("/", 1)
+                  fps_value = round(float(num) / float(den), 3) if float(den) else 0
+                  info = {
+                      "file": OUTPUT,
+                      "size_bytes": size,
+                      "size_mb": round(size / 1024 / 1024, 2),
+                      "codec": stream.get("codec_name"),
+                      "width": stream.get("width"),
+                      "height": stream.get("height"),
+                      "fps": fps_value,
+                      "pixel_format": stream.get("pix_fmt"),
+                      "duration": float(stream.get("duration") or 0),
+                  }
+                  final_info = info
+                  return info
+              except Exception:
+                  return None
+
+          def build_status():
+              global status, last_error
+              with state_lock:
+                  process = ffmpeg_process
+                  if status == "recording" and process is not None and process.poll() is not None:
+                      status = "failed"
+                      last_error = f"FFmpeg exited unexpectedly with code {process.returncode}"
+                  duration = 0
+                  if started_at is not None:
+                      if status == "completed" and final_info:
+                          duration = final_info.get("duration", 0)
+                      else:
+                          duration = max(0, round((now() - started_at), 3))
+                  return {
+                      "success": status not in ("failed",),
+                      "status": status,
+                      "recording": status == "recording",
+                      "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_at)) if started_at else None,
+                      "duration_live": duration,
+                      "file_ready": status == "completed" and os.path.exists(OUTPUT),
+                      "file": final_info,
+                      "error": last_error,
+                  }
+
+          def start_recording():
+              global ffmpeg_process, started_at, status, last_error, final_info
+              with state_lock:
+                  if status == "recording":
+                      return 409, {"success": False, "error": "Recording is already running.", **build_status()}
+                  if status == "finalizing":
+                      return 409, {"success": False, "error": "Previous recording is still finalizing."}
+                  if os.path.exists(OUTPUT):
+                      os.remove(OUTPUT)
+                  final_info = None
+                  last_error = None
+                  log = open(LOGFILE, "w", buffering=1)
+                  cmd = [
+                      "ffmpeg", "-hide_banner", "-loglevel", "warning",
+                      "-f", "x11grab",
+                      "-draw_mouse", "1",
+                      "-framerate", str(FPS),
+                      "-video_size", f"{WIDTH}x{HEIGHT}",
+                      "-i", f"{DISPLAY}.0",
+                      "-an",
+                      "-c:v", "libx264",
+                      "-preset", "veryfast",
+                      "-crf", "14",
+                      "-tune", "animation",
+                      "-pix_fmt", "yuv420p",
+                      "-movflags", "+faststart",
+                      "-y", OUTPUT,
+                  ]
+                  ffmpeg_process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+                  started_at = now()
+                  status = "recording"
+                  return 200, build_status()
+
+          def stop_recording():
+              global ffmpeg_process, status, last_error
+              with state_lock:
+                  if status != "recording" or ffmpeg_process is None:
+                      return 409, {"success": False, "error": "No active recording.", **build_status()}
+                  status = "finalizing"
+                  process = ffmpeg_process
+              try:
+                  process.send_signal(signal.SIGINT)
+              except Exception as exc:
+                  with state_lock:
+                      status = "failed"
+                      last_error = f"Could not signal FFmpeg: {exc}"
+                  return 500, build_status()
+              try:
+                  process.wait(timeout=45)
+              except subprocess.TimeoutExpired:
+                  try:
+                      process.terminate()
+                  except Exception:
+                      pass
+                  try:
+                      process.wait(timeout=10)
+                  except subprocess.TimeoutExpired:
+                      try:
+                          process.kill()
+                      except Exception:
+                          pass
+                      process.wait(timeout=5)
+              info = file_info()
+              with state_lock:
+                  if process.returncode not in (0, 255):
+                      status = "failed"
+                      last_error = f"FFmpeg exited with code {process.returncode}"
+                  elif not info:
+                      status = "failed"
+                      last_error = "Recording file was not finalized or ffprobe could not validate it."
+                  else:
+                      status = "completed"
+                      last_error = None
+                  ffmpeg_process = None
+                  payload = build_status()
+              return (200 if status == "completed" else 500), payload
+
+          class Handler(BaseHTTPRequestHandler):
+              server_version = "SaaSRecorderAPI/1.0"
+
+              def log_message(self, fmt, *args):
+                  print(fmt % args, flush=True)
+
+              def do_GET(self):
+                  if self.path == "/api/health":
+                      send_json(self, 200, {"ok": True})
+                      return
+                  if not self.path.startswith("/api/"):
+                      send_json(self, 404, {"success": False, "error": "Not found"})
+                      return
+                  if not auth_ok(self):
+                      send_json(self, 401, {"success": False, "error": "Unauthorized"})
+                      return
+                  if self.path in ("/api/status", "/api/record/status"):
+                      send_json(self, 200, build_status())
+                      return
+                  send_json(self, 404, {"success": False, "error": "Not found"})
+
+              def do_POST(self):
+                  if not self.path.startswith("/api/"):
+                      send_json(self, 404, {"success": False, "error": "Not found"})
+                      return
+                  if not auth_ok(self):
+                      send_json(self, 401, {"success": False, "error": "Unauthorized"})
+                      return
+                  if self.path == "/api/record/start":
+                      code, payload = start_recording()
+                      send_json(self, code, payload)
+                      return
+                  if self.path == "/api/record/stop":
+                      code, payload = stop_recording()
+                      send_json(self, code, payload)
+                      return
+                  send_json(self, 404, {"success": False, "error": "Not found"})
+
+          if __name__ == "__main__":
+              server = ThreadingHTTPServer((HOST, PORT), Handler)
+              print(f"Recording API listening on http://{HOST}:{PORT}", flush=True)
+              server.serve_forever()
+          PY
+
+      - name: Create Control Panel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /opt/record-ui
+          cat > /opt/record-ui/control.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>SaaS Recording Control</title>
+            <style>
+              *{box-sizing:border-box}body{margin:0;background:#f5f5f5;color:#1c1917;font-family:Arial,sans-serif}header{padding:18px 22px;border-bottom:1px solid #ddd;background:#fff;display:flex;gap:14px;align-items:center;flex-wrap:wrap}h1{font-size:20px;margin:0}.pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fafafa;font-size:12px}main{padding:18px;display:grid;grid-template-columns:330px 1fr;gap:18px;height:calc(100vh - 70px)}.panel{background:#fff;border:1px solid #ddd;border-radius:14px;padding:16px;overflow:auto}.controls{display:flex;flex-direction:column;gap:12px}label{font-size:12px;font-weight:700}input{width:100%;padding:11px;border:1px solid #ccc;border-radius:9px;font-size:13px}button{padding:12px;border:0;border-radius:9px;cursor:pointer;font-weight:700}button.start{background:#1c1917;color:#fff}button.stop{background:#ddd;color:#1c1917}button.open{background:#efefef}.status{padding:12px;border:1px solid #ddd;border-radius:10px;background:#fafafa;white-space:pre-wrap;font:12px monospace}.meta{font-size:12px;line-height:1.7}.danger{color:#a00}.ok{color:#176b2c}.viewer{padding:0;overflow:hidden;background:#111}.viewer iframe{width:100%;height:100%;border:0;display:block}small{color:#666}.row{display:flex;gap:8px}.row button{flex:1}</style>
+          </head>
+          <body>
+            <header><h1>🎥 SaaS Recording Control</h1><span class="pill" id="state">IDLE</span><span class="pill">2560×1440 · 60 FPS · Cursor 64px</span></header>
+            <main>
+              <section class="panel">
+                <div class="controls">
+                  <div><label>Recording API Token</label><input id="token" type="password" placeholder="Paste token from GitHub Actions Summary"></div>
+                  <div><label>VNC Password</label><input id="vncpass" type="password" placeholder="Paste VNC password from GitHub Actions Summary"></div>
+                  <div class="row"><button class="open" onclick="openRemote()">Open Remote</button><button class="open" onclick="refreshRemote()">Refresh</button></div>
+                  <button class="start" onclick="startRecording()">🔴 START RECORDING</button>
+                  <button class="stop" onclick="stopRecording()">⏹ STOP & SAVE VIDEO</button>
+                  <div class="status" id="status">Loading status...</div>
+                  <div class="meta"><b>Workflow logic</b><br>1. Open Remote.<br>2. Prepare your SaaS demo.<br>3. Press START exactly when the shot begins.<br>4. Do the demo manually with mouse/keyboard.<br>5. Press STOP & SAVE exactly when the shot ends.<br>6. FFmpeg finalizes and validates the MP4.</div>
+                  <small>The session timeout is only a safety limit. It does not define the video duration.</small>
+                </div>
+              </section>
+              <section class="panel viewer"><iframe id="remote" src="/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe></section>
+            </main>
+            <script>
+              const tokenEl=document.getElementById('token'); const passEl=document.getElementById('vncpass'); const stateEl=document.getElementById('state'); const statusEl=document.getElementById('status'); const remote=document.getElementById('remote');
+              tokenEl.value=sessionStorage.getItem('recordToken')||''; passEl.value=sessionStorage.getItem('vncPassword')||'';
+              tokenEl.addEventListener('input',()=>sessionStorage.setItem('recordToken',tokenEl.value.trim())); passEl.addEventListener('input',()=>sessionStorage.setItem('vncPassword',passEl.value.trim()));
+              function auth(){const t=tokenEl.value.trim(); if(!t){alert('Paste the Recording API Token from the GitHub Actions Summary.');throw new Error('Missing token')} return {'Authorization':'Bearer '+t};}
+              async function api(path,method='GET'){const r=await fetch(path,{method,headers:auth()});let d={};try{d=await r.json()}catch{} if(!r.ok) throw new Error(d.error||('HTTP '+r.status)); return d;}
+              async function refreshStatus(){try{const d=await api('/api/status'); stateEl.textContent=(d.status||'unknown').toUpperCase(); statusEl.textContent=JSON.stringify(d,null,2); stateEl.className='pill '+(d.status==='recording'?'danger':d.status==='completed'?'ok':'');}catch(e){statusEl.textContent=e.message;}}
+              async function startRecording(){try{const d=await api('/api/record/start','POST');stateEl.textContent='RECORDING';statusEl.textContent=JSON.stringify(d,null,2);}catch(e){alert(e.message);}}
+              async function stopRecording(){try{stateEl.textContent='FINALIZING';const d=await api('/api/record/stop','POST');stateEl.textContent=(d.status||'completed').toUpperCase();statusEl.textContent=JSON.stringify(d,null,2);}catch(e){alert(e.message);await refreshStatus();}}
+              function openRemote(){const p=encodeURIComponent(passEl.value.trim());const url='/vnc.html?autoconnect=true&resize=scale&path=websockify'+(p?'&password='+p:'');remote.src=url;}
+              function refreshRemote(){remote.src='/vnc.html?autoconnect=true&resize=scale&path=websockify';}
+              refreshStatus(); setInterval(refreshStatus,3000);
+            </script>
+          </body>
+          </html>
+          HTML
+
+      - name: Start Recording API
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_TOKEN="$(openssl rand -hex 24)"
+          echo "RECORD_API_TOKEN=${API_TOKEN}" >> "${GITHUB_ENV}"
+          nohup env \
+            DISPLAY="${DISPLAY}" \
+            WIDTH="${WIDTH}" \
+            HEIGHT="${HEIGHT}" \
+            FPS="${FPS}" \
+            RECORDING_FILE="${RECORDING_FILE}" \
+            RECORD_API_TOKEN="${API_TOKEN}" \
+            python3 /tmp/recorder/server.py \
+            > /tmp/recorder/api.log 2>&1 < /dev/null &
+          echo $! > /tmp/recorder/api.pid
+          sleep 3
+          curl -fsS http://127.0.0.1:8090/api/health
+
+      - name: Configure Nginx Gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo tee /etc/nginx/sites-available/recorder >/dev/null <<'NGINX'
+          server {
+              listen 8080;
+              server_name _;
+              client_max_body_size 1g;
+
+              location /api/ {
+                  proxy_pass http://127.0.0.1:8090;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_read_timeout 60s;
+              }
+
+              location = /control.html {
+                  alias /opt/record-ui/control.html;
+                  default_type text/html;
+              }
+
+              location = / {
+                  return 302 /control.html;
+              }
+
+              location /websockify {
+                  proxy_pass http://127.0.0.1:6080;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_read_timeout 86400;
+              }
+
+              location / {
+                  proxy_pass http://127.0.0.1:6080;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_read_timeout 86400;
+              }
+          }
+          NGINX
+          sudo ln -sf /etc/nginx/sites-available/recorder /etc/nginx/sites-enabled/recorder
+          sudo nginx -t
+          sudo systemctl restart nginx
+          sleep 2
+          curl -fsS http://127.0.0.1:8080/control.html >/dev/null
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
+          cloudflared --version
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080 > /tmp/recorder/cloudflared.log 2>&1 < /dev/null &
+          echo $! > /tmp/recorder/cloudflared.pid
+          REMOTE_URL=""
+          for i in $(seq 1 60); do
+            REMOTE_URL="$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/recorder/cloudflared.log | head -n 1 || true)"
+            [ -n "${REMOTE_URL}" ] && break
+            sleep 1
+          done
+          if [ -z "${REMOTE_URL}" ]; then
+            cat /tmp/recorder/cloudflared.log
+            exit 1
+          fi
+          echo "REMOTE_URL=${REMOTE_URL}" >> "${GITHUB_ENV}"
+          {
+            echo "# 🎥 SaaS Recording Session"
+            echo
+            echo "## Remote Control Panel"
+            echo
+            echo "${REMOTE_URL}/control.html"
+            echo
+            echo "## noVNC Direct"
+            echo
+            echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale&path=websockify"
+            echo
+            echo "## Recording API"
+            echo
+            echo "GET  ${REMOTE_URL}/api/status"
+            echo "POST ${REMOTE_URL}/api/record/start"
+            echo "POST ${REMOTE_URL}/api/record/stop"
+            echo
+            echo "## Recording API Token"
+            echo
+            echo '\`${RECORD_API_TOKEN}\`' 
+            echo
+            echo "## VNC Password"
+            echo
+            echo "\`${VNC_PASSWORD}\`"
+            echo
+            echo "## Capture"
+            echo
+            echo "${WIDTH} × ${HEIGHT} @ ${FPS} FPS"
+            echo "Cursor target: ${XCURSOR_SIZE}px"
+            echo
+            echo "The session timeout is only a safety limit. Recording starts only when /api/record/start is called and ends only when /api/record/stop is called."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "=================================================="
+          echo "REMOTE CONTROL PANEL"
+          echo "${REMOTE_URL}/control.html"
+          echo "=================================================="
+          echo "API TOKEN"
+          echo "${RECORD_API_TOKEN}"
+          echo "=================================================="
+          echo "VNC PASSWORD"
+          echo "${VNC_PASSWORD}"
+          echo "=================================================="
+
+      - name: Wait For Recording To Finish
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOTAL_SECONDS=$((SESSION_MINUTES * 60))
+          STARTED_AT="$(date +%s)"
+          echo "Waiting for your START/STOP API commands."
+          echo "Safety session limit: ${SESSION_MINUTES} minutes."
+          while true; do
+            JSON="$(curl -fsS -H "Authorization: Bearer ${RECORD_API_TOKEN}" http://127.0.0.1:8090/api/status)"
+            echo "${JSON}"
+            STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unknown"))' <<< "${JSON}")"
+            if [ "${STATUS}" = "completed" ]; then
+              echo "Recording completed by API STOP."
+              break
+            fi
+            if [ "${STATUS}" = "failed" ]; then
+              echo "Recording failed."
+              exit 1
+            fi
+            NOW="$(date +%s)"
+            if [ $((NOW - STARTED_AT)) -ge "${TOTAL_SECONDS}" ]; then
+              echo "Safety limit reached. Asking API to finalize any active recording."
+              curl -fsS -X POST -H "Authorization: Bearer ${RECORD_API_TOKEN}" http://127.0.0.1:8090/api/record/stop || true
+              break
+            fi
+            sleep 3
+          done
+
+      - name: Verify Final Video
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "${RECORDING_FILE}"
+          test "$(stat -c%s "${RECORDING_FILE}")" -gt 100000
+          ffprobe -v error -select_streams v:0 \
+            -show_entries stream=codec_name,width,height,avg_frame_rate,pix_fmt,duration \
+            -of default=noprint_wrappers=1 \
+            "${RECORDING_FILE}"
+          ls -lh "${RECORDING_FILE}"
+
+      - name: Upload Final Video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: saas-demo-recording
+          path: recording.mp4
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: saas-demo-diagnostics
+          path: /tmp/recorder/
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -f /tmp/recorder/api.pid ]; then kill "$(cat /tmp/recorder/api.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/recorder/ffmpeg.pid ]; then kill -INT "$(cat /tmp/recorder/ffmpeg.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/recorder/cloudflared.pid ]; then kill "$(cat /tmp/recorder/cloudflared.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/recorder/novnc.pid ]; then kill "$(cat /tmp/recorder/novnc.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/recorder/x11vnc.pid ]; then kill "$(cat /tmp/recorder/x11vnc.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/recorder/chromium.pid ]; then kill "$(cat /tmp/recorder/chromium.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/recorder/xvfb.pid ]; then kill "$(cat /tmp/recorder/xvfb.pid)" 2>/dev/null || true; fi
+          pkill -f cloudflared 2>/dev/null || true
+          pkill -f websockify 2>/dev/null || true
+          pkill -f x11vnc 2>/dev/null || true
+          pkill -f chromium 2>/dev/null || true
+          pkill -f Xvfb 2>/dev/null || true
