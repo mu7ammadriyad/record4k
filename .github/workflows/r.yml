@@ -1,22 +1,30 @@
-name: Professional SaaS Screen Recorder
+name: Remote SaaS Demo Recorder
 
 on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: "رابط الموقع الذي سيتم تسجيله"
+        description: "رابط الموقع الذي سيفتحه Chromium"
         required: true
         default: "https://example.com"
+
+      session_minutes:
+        description: "مدة الجلسة والتسجيل بالدقائق"
+        required: true
+        default: "60"
+
       width:
-        description: "عرض الفيديو"
+        description: "عرض الشاشة"
         required: true
         default: "1920"
+
       height:
-        description: "ارتفاع الفيديو"
+        description: "ارتفاع الشاشة"
         required: true
         default: "1080"
+
       fps:
-        description: "عدد الإطارات في الثانية"
+        description: "FPS"
         required: true
         default: "60"
 
@@ -24,9 +32,9 @@ permissions:
   contents: read
 
 jobs:
-  record:
+  remote-demo:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 350
 
     env:
       DISPLAY: ":99"
@@ -34,9 +42,10 @@ jobs:
       HEIGHT: ${{ inputs.height }}
       FPS: ${{ inputs.fps }}
       SITE_URL: ${{ inputs.site_url }}
+      SESSION_MINUTES: ${{ inputs.session_minutes }}
 
     steps:
-      - name: Install Recording Stack
+      - name: Install Everything
         shell: bash
         run: |
           set -e
@@ -45,27 +54,39 @@ jobs:
 
           sudo apt-get install -y \
             xvfb \
+            x11vnc \
+            novnc \
+            websockify \
             xdotool \
             x11-utils \
             x11-xserver-utils \
             ffmpeg \
             chromium \
-            fonts-liberation \
-            fonts-noto-color-emoji \
+            curl \
+            wget \
+            openssl \
             ca-certificates
 
-          echo "Installed:"
+          echo "========================================"
+          echo "Installed versions"
+          echo "========================================"
+
           chromium --version
           ffmpeg -version | head -n 1
-          Xvfb -help >/dev/null 2>&1 || true
-          xdotool --version
+          x11vnc -version 2>&1 | head -n 1
+          websockify --version 2>&1 || true
 
-      - name: Start Virtual Screen
+          test -f /usr/share/novnc/vnc.html
+
+          echo "Everything installed successfully."
+
+      - name: Start Virtual Display
         shell: bash
         run: |
           set -e
 
-          echo "Starting Xvfb on ${DISPLAY}..."
+          echo "Starting Xvfb..."
+
           Xvfb "${DISPLAY}" \
             -screen 0 "${WIDTH}x${HEIGHT}x24" \
             -ac \
@@ -75,15 +96,14 @@ jobs:
             -noreset \
             > /tmp/xvfb.log 2>&1 &
 
-          XVFB_PID=$!
-          echo "${XVFB_PID}" > /tmp/xvfb.pid
+          echo $! > /tmp/xvfb.pid
 
           sleep 3
 
-          DISPLAY="${DISPLAY}" xdpyinfo | grep -E "dimensions|depth of root"
+          DISPLAY="${DISPLAY}" xdpyinfo | grep dimensions
           DISPLAY="${DISPLAY}" xrandr || true
 
-      - name: Prepare Chromium Profile
+      - name: Start Chromium
         shell: bash
         run: |
           set -e
@@ -91,12 +111,8 @@ jobs:
           rm -rf /tmp/chromium-profile
           mkdir -p /tmp/chromium-profile
 
-      - name: Start Chromium Fullscreen
-        shell: bash
-        run: |
-          set -e
-
-          echo "Opening: ${SITE_URL}"
+          echo "Opening:"
+          echo "${SITE_URL}"
 
           chromium \
             --no-sandbox \
@@ -116,8 +132,7 @@ jobs:
             "${SITE_URL}" \
             > /tmp/chromium.log 2>&1 &
 
-          CHROMIUM_PID=$!
-          echo "${CHROMIUM_PID}" > /tmp/chromium.pid
+          echo $! > /tmp/chromium.pid
 
           echo "Waiting for Chromium..."
 
@@ -134,32 +149,200 @@ jobs:
 
           DISPLAY="${DISPLAY}" xdotool mousemove 1 1
 
-          echo "Chromium ready."
+          echo "Chromium is ready."
 
-      - name: Verify Recording Geometry
+      - name: Start VNC Server
         shell: bash
         run: |
           set -e
 
-          echo "Display: ${DISPLAY}"
-          echo "Resolution: ${WIDTH}x${HEIGHT}"
-          echo "FPS: ${FPS}"
+          VNC_PASSWORD="$(openssl rand -hex 6)"
 
-          DISPLAY="${DISPLAY}" xdpyinfo | grep dimensions
+          mkdir -p "$HOME/.vnc"
 
-          echo "Chromium windows:"
-          DISPLAY="${DISPLAY}" xdotool search --onlyvisible --class chromium getwindowname %@ || true
+          x11vnc \
+            -display "${DISPLAY}" \
+            -rfbport 5900 \
+            -rfbauth "$HOME/.vnc/passwd" \
+            -localhost \
+            -forever \
+            -shared \
+            -noxdamage \
+            -noxfixes \
+            -repeat \
+            -noshm \
+            -wait 5 \
+            -defer 5 \
+            > /tmp/x11vnc.log 2>&1 &
 
-      - name: Start FFmpeg Recording
+          X11VNC_PID=$!
+
+          echo "${X11VNC_PID}" > /tmp/x11vnc.pid
+
+          x11vnc -storepasswd \
+            "${VNC_PASSWORD}" \
+            "$HOME/.vnc/passwd"
+
+          chmod 600 "$HOME/.vnc/passwd"
+
+          echo "VNC_PASSWORD=${VNC_PASSWORD}" >> "$GITHUB_ENV"
+
+          sleep 5
+
+          if ! kill -0 "${X11VNC_PID}" 2>/dev/null; then
+            echo "x11vnc failed."
+            cat /tmp/x11vnc.log
+            exit 1
+          fi
+
+          echo "x11vnc is running."
+
+      - name: Start noVNC
+        shell: bash
+        run: |
+          set -e
+
+          echo "Starting noVNC..."
+
+          nohup websockify \
+            --web=/usr/share/novnc \
+            6080 \
+            127.0.0.1:5900 \
+            > /tmp/novnc.log 2>&1 < /dev/null &
+
+          echo $! > /tmp/novnc.pid
+
+          sleep 5
+
+          curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null
+
+          echo "noVNC is ready."
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -e
+
+          echo "Installing cloudflared..."
+
+          wget -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -O /tmp/cloudflared.deb
+
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
+
+          cloudflared --version
+
+          echo "Starting Cloudflare Quick Tunnel..."
+
+          nohup cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:6080 \
+            > /tmp/cloudflared.log 2>&1 < /dev/null &
+
+          echo $! > /tmp/cloudflared.pid
+
+          echo "Waiting for trycloudflare.com URL..."
+
+          REMOTE_URL=""
+
+          for i in $(seq 1 60); do
+            REMOTE_URL="$(
+              grep -oE \
+                'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log |
+                head -n 1 || true
+            )"
+
+            if [ -n "${REMOTE_URL}" ]; then
+              break
+            fi
+
+            sleep 1
+          done
+
+          if [ -z "${REMOTE_URL}" ]; then
+            echo "Cloudflare tunnel failed."
+            cat /tmp/cloudflared.log
+            exit 1
+          fi
+
+          echo "REMOTE_URL=${REMOTE_URL}" >> "$GITHUB_ENV"
+
+          echo
+          echo "=============================================="
+          echo "REMOTE COMPUTER READY"
+          echo "=============================================="
+          echo
+          echo "Remote URL:"
+          echo "${REMOTE_URL}/vnc.html"
+          echo
+          echo "VNC Password:"
+          echo "${VNC_PASSWORD}"
+          echo
+          echo "Site:"
+          echo "${SITE_URL}"
+          echo
+          echo "Resolution:"
+          echo "${WIDTH}x${HEIGHT}"
+          echo
+          echo "FPS:"
+          echo "${FPS}"
+          echo
+          echo "Session:"
+          echo "${SESSION_MINUTES} minutes"
+          echo
+          echo "=============================================="
+
+          {
+            echo "# 🖥️ Remote SaaS Demo Computer"
+            echo
+            echo "## 🌐 Remote Computer"
+            echo
+            echo "[Open Remote Computer](${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale&password=${VNC_PASSWORD})"
+            echo
+            echo "**VNC Password:** \`${VNC_PASSWORD}\`"
+            echo
+            echo "## 🌐 SaaS Website"
+            echo
+            echo "${SITE_URL}"
+            echo
+            echo "## 🖥️ Resolution"
+            echo
+            echo "${WIDTH} × ${HEIGHT}"
+            echo
+            echo "## 🎥 Recording"
+            echo
+            echo "${FPS} FPS"
+            echo
+            echo "Recording starts automatically."
+            echo "Control the virtual computer from the Remote Computer link."
+            echo
+            echo "## ⏱️ Session"
+            echo
+            echo "${SESSION_MINUTES} minutes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait Before Recording
+        shell: bash
+        run: |
+          set -e
+
+          echo "Remote computer is ready."
+          echo "Giving you 10 seconds to open the remote link..."
+
+          sleep 10
+
+      - name: Start Recording
         shell: bash
         run: |
           set -e
 
           rm -f recording.mp4
 
-          echo "Starting high-quality recording..."
+          echo "Starting FFmpeg recording..."
 
-          ffmpeg \
+          nohup ffmpeg \
             -hide_banner \
             -loglevel warning \
             -f x11grab \
@@ -169,18 +352,19 @@ jobs:
             -i "${DISPLAY}.0" \
             -an \
             -c:v libx264 \
-            -preset veryfast \
+            -preset faster \
             -crf 16 \
             -tune animation \
             -pix_fmt yuv420p \
             -movflags +faststart \
             recording.mp4 \
-            > /tmp/ffmpeg.log 2>&1 &
+            > /tmp/ffmpeg.log 2>&1 < /dev/null &
 
-          FFMPEG_PID=$!
-          echo "${FFMPEG_PID}" > /tmp/ffmpeg.pid
+          echo $! > /tmp/ffmpeg.pid
 
           sleep 3
+
+          FFMPEG_PID="$(cat /tmp/ffmpeg.pid)"
 
           if ! kill -0 "${FFMPEG_PID}" 2>/dev/null; then
             echo "FFmpeg failed to start."
@@ -188,134 +372,117 @@ jobs:
             exit 1
           fi
 
-          echo "Recording started."
+          echo
+          echo "=============================================="
+          echo "🎥 RECORDING STARTED"
+          echo "=============================================="
+          echo
+          echo "Remote Computer:"
+          echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale&password=${VNC_PASSWORD}"
+          echo
+          echo "Do your demo now."
+          echo "Your mouse and keyboard actions will be recorded."
+          echo
 
-      - name: Run SaaS Demo
+      - name: Keep Session Alive
         shell: bash
         run: |
           set -e
 
-          export DISPLAY="${DISPLAY}"
+          MINUTES="${SESSION_MINUTES}"
 
-          echo "Starting demo sequence..."
+          if ! [[ "${MINUTES}" =~ ^[0-9]+$ ]]; then
+            echo "Invalid session_minutes."
+            exit 1
+          fi
 
-          # ============================================================
-          # 🎬 EDIT YOUR DEMO HERE
-          # ============================================================
-          #
-          # Coordinates are based on your selected resolution.
-          #
-          # Example:
-          #   mousemove X Y
-          #   sleep SECONDS
-          #   click 1
-          #
-          # Mouse button:
-          #   1 = left
-          #   2 = middle
-          #   3 = right
-          #
-          # Keyboard:
-          #   key ENTER
-          #   key TAB
-          #   key ESC
-          #   key CTRL+A
-          #
-          # Scroll:
-          #   click 4 = scroll up
-          #   click 5 = scroll down
-          #
-          # ============================================================
+          TOTAL_SECONDS=$((MINUTES * 60))
 
-          # Move into the page
-          xdotool mousemove --sync 960 540
-          sleep 2
+          echo "Session active for ${MINUTES} minutes."
 
-          # Hover
-          xdotool mousemove --sync 700 400
-          sleep 2
+          for ((i=1; i<=TOTAL_SECONDS; i++)); do
+            sleep 1
 
-          # Example click
-          xdotool click 1
-          sleep 2
+            if (( i % 30 == 0 )); then
+              REMAINING=$((TOTAL_SECONDS - i))
 
-          # Example move
-          xdotool mousemove --sync 1100 400
-          sleep 1
+              echo "Remaining: ${REMAINING} seconds"
+            fi
+          done
 
-          # Example second click
-          xdotool click 1
-          sleep 3
-
-          # Example smooth-ish scroll sequence
-          xdotool mousemove --sync 1200 850
-          sleep 1
-
-          xdotool click 5
-          sleep 0.35
-          xdotool click 5
-          sleep 0.35
-          xdotool click 5
-          sleep 0.35
-          xdotool click 5
-          sleep 1.5
-
-          # Move somewhere else
-          xdotool mousemove --sync 500 350
-          sleep 2
-
-          # ============================================================
-          # END DEMO
-          # ============================================================
-
-          echo "Demo sequence finished."
-
-          # Give animations/transitions time to finish.
-          sleep 3
-
-      - name: Stop Recording
+      - name: Stop Recording Cleanly
+        if: always()
         shell: bash
         run: |
-          set -e
+          set +e
+
+          echo "Stopping FFmpeg..."
 
           if [ -f /tmp/ffmpeg.pid ]; then
             FFMPEG_PID="$(cat /tmp/ffmpeg.pid)"
 
             if kill -0 "${FFMPEG_PID}" 2>/dev/null; then
-              echo "Stopping FFmpeg..."
-              kill -INT "${FFMPEG_PID}" || true
-              wait "${FFMPEG_PID}" || true
+              kill -INT "${FFMPEG_PID}" 2>/dev/null || true
+
+              for i in $(seq 1 30); do
+                if ! kill -0 "${FFMPEG_PID}" 2>/dev/null; then
+                  break
+                fi
+
+                sleep 1
+              done
+
+              if kill -0 "${FFMPEG_PID}" 2>/dev/null; then
+                kill -TERM "${FFMPEG_PID}" 2>/dev/null || true
+                sleep 2
+              fi
             fi
           fi
 
           echo
-          echo "Recording finished."
+          echo "FFmpeg stopped."
 
-          if [ ! -f recording.mp4 ]; then
-            echo "recording.mp4 was not created."
-            cat /tmp/ffmpeg.log || true
-            exit 1
+          if [ -f /tmp/ffmpeg.log ]; then
+            echo
+            echo "FFmpeg log:"
+            tail -n 50 /tmp/ffmpeg.log || true
           fi
 
           echo
-          echo "Video information:"
+          echo "Checking recording..."
+
+          if [ ! -f recording.mp4 ]; then
+            echo "recording.mp4 does not exist."
+            exit 1
+          fi
+
+          FILE_SIZE="$(stat -c%s recording.mp4 2>/dev/null || echo 0)"
+
+          if [ "${FILE_SIZE}" -lt 100000 ]; then
+            echo "Recording file is unexpectedly small."
+            ls -lh recording.mp4 || true
+            exit 1
+          fi
+
           ffprobe \
             -v error \
             -select_streams v:0 \
-            -show_entries stream=width,height,r_frame_rate,codec_name,pix_fmt \
+            -show_entries \
+              stream=codec_name,width,height,r_frame_rate,pix_fmt,duration \
             -of default=noprint_wrappers=1 \
             recording.mp4
 
           echo
-          echo "File size:"
+          echo "Final recording:"
           ls -lh recording.mp4
 
-      - name: Upload Video
+      - name: Upload Recording
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: saas-demo-recording
           path: recording.mp4
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload Logs
@@ -326,6 +493,9 @@ jobs:
           path: |
             /tmp/xvfb.log
             /tmp/chromium.log
+            /tmp/x11vnc.log
+            /tmp/novnc.log
+            /tmp/cloudflared.log
             /tmp/ffmpeg.log
           if-no-files-found: ignore
           retention-days: 3
@@ -340,6 +510,18 @@ jobs:
             kill -INT "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || true
           fi
 
+          if [ -f /tmp/cloudflared.pid ]; then
+            kill "$(cat /tmp/cloudflared.pid)" 2>/dev/null || true
+          fi
+
+          if [ -f /tmp/novnc.pid ]; then
+            kill "$(cat /tmp/novnc.pid)" 2>/dev/null || true
+          fi
+
+          if [ -f /tmp/x11vnc.pid ]; then
+            kill "$(cat /tmp/x11vnc.pid)" 2>/dev/null || true
+          fi
+
           if [ -f /tmp/chromium.pid ]; then
             kill "$(cat /tmp/chromium.pid)" 2>/dev/null || true
           fi
@@ -349,6 +531,9 @@ jobs:
           fi
 
           pkill -f chromium 2>/dev/null || true
+          pkill -f cloudflared 2>/dev/null || true
+          pkill -f websockify 2>/dev/null || true
+          pkill -f x11vnc 2>/dev/null || true
           pkill -f Xvfb 2>/dev/null || true
 
           echo "Cleanup complete."
