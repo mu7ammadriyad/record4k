@@ -1,10 +1,22 @@
-name: Remote SaaS Demo Compute4r
+name: Professional SaaS Screen Recorder
 
 on:
   workflow_dispatch:
     inputs:
-      session_minutes:
-        description: "مدة تشغيل الكمبيوتر الافتراضي بالدقائق"
+      site_url:
+        description: "رابط الموقع الذي سيتم تسجيله"
+        required: true
+        default: "https://example.com"
+      width:
+        description: "عرض الفيديو"
+        required: true
+        default: "1920"
+      height:
+        description: "ارتفاع الفيديو"
+        required: true
+        default: "1080"
+      fps:
+        description: "عدد الإطارات في الثانية"
         required: true
         default: "60"
 
@@ -12,410 +24,309 @@ permissions:
   contents: read
 
 jobs:
-  remote-desktop:
+  record:
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 30
 
     env:
       DISPLAY: ":99"
-      SCREEN_WIDTH: "1920"
-      SCREEN_HEIGHT: "1080"
-      SESSION_MINUTES: ${{ inputs.session_minutes }}
-      XDG_CURRENT_DESKTOP: "GNOME"
-      XDG_SESSION_DESKTOP: "gnome"
-      XDG_SESSION_TYPE: "x11"
-      GDMSESSION: "gnome-xorg"
-      LIBGL_ALWAYS_SOFTWARE: "1"
-      MESA_LOADER_DRIVER_OVERRIDE: "llvmpipe"
+      WIDTH: ${{ inputs.width }}
+      HEIGHT: ${{ inputs.height }}
+      FPS: ${{ inputs.fps }}
+      SITE_URL: ${{ inputs.site_url }}
 
     steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Desktop and Tools
+      - name: Install Recording Stack
         shell: bash
         run: |
           set -e
-          export DEBIAN_FRONTEND=noninteractive
+
           sudo apt-get update
-          sudo apt-get install -y gnome-shell gnome-session gnome-settings-daemon mutter dbus-x11 dbus-user-session x11-xserver-utils xserver-xorg-core xvfb x11vnc ffmpeg curl wget git python3 python3-pip python3-venv ca-certificates openssl mesa-utils mesa-vulkan-drivers libgl1-mesa-dri pipewire pipewire-audio pipewire-pulse wireplumber pulseaudio-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
-          echo "GNOME + PipeWire + GNOME ScreenCast portal installed."
 
-      - name: Install Chromium
+          sudo apt-get install -y \
+            xvfb \
+            xdotool \
+            x11-utils \
+            x11-xserver-utils \
+            ffmpeg \
+            chromium \
+            fonts-liberation \
+            fonts-noto-color-emoji \
+            ca-certificates
+
+          echo "Installed:"
+          chromium --version
+          ffmpeg -version | head -n 1
+          Xvfb -help >/dev/null 2>&1 || true
+          xdotool --version
+
+      - name: Start Virtual Screen
         shell: bash
         run: |
           set -e
-          if command -v chromium >/dev/null 2>&1; then
-            chromium --version
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            chromium-browser --version
-          else
-            sudo apt-get install -y chromium
-            chromium --version
-          fi
 
-      - name: Install Cloudflared
-        shell: bash
-        run: |
-          set -e
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb
-          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
-          cloudflared --version
+          echo "Starting Xvfb on ${DISPLAY}..."
+          Xvfb "${DISPLAY}" \
+            -screen 0 "${WIDTH}x${HEIGHT}x24" \
+            -ac \
+            +extension GLX \
+            +extension RANDR \
+            +render \
+            -noreset \
+            > /tmp/xvfb.log 2>&1 &
 
-      - name: Install OpenScreen
-        shell: bash
-        run: |
-          set -e
-          wget -q https://github.com/getopenscreen/openscreen/releases/download/v1.12.2/Openscreen-Linux-1.12.2.deb -O /tmp/openscreen.deb
-          sudo apt-get install -y /tmp/openscreen.deb
-          command -v openscreen
-          openscreen --version || true
+          XVFB_PID=$!
+          echo "${XVFB_PID}" > /tmp/xvfb.pid
 
-      - name: Start Virtual Display
-        shell: bash
-        run: |
-          set -e
-          Xvfb "$DISPLAY" -screen 0 "${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" -ac +extension GLX +extension RANDR +render -noreset > /tmp/xvfb.log 2>&1 &
-          echo $! > /tmp/xvfb.pid
-          sleep 5
-          xdpyinfo -display "$DISPLAY" | head -n 20
-
-      - name: Prepare Session Environment
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export GDMSESSION=gnome-xorg
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          mkdir -p "$XDG_RUNTIME_DIR"
-          chmod 700 "$XDG_RUNTIME_DIR"
-          echo "DISPLAY=:99" >> "$GITHUB_ENV"
-          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
-          echo "XDG_CURRENT_DESKTOP=GNOME" >> "$GITHUB_ENV"
-          echo "XDG_SESSION_DESKTOP=gnome" >> "$GITHUB_ENV"
-          echo "XDG_SESSION_TYPE=x11" >> "$GITHUB_ENV"
-          echo "GDMSESSION=gnome-xorg" >> "$GITHUB_ENV"
-          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
-          echo "MESA_LOADER_DRIVER_OVERRIDE=llvmpipe" >> "$GITHUB_ENV"
-          eval "$(dbus-launch --sh-syntax --exit-with-session)"
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
-          echo "Session environment ready."
-
-      - name: Configure GNOME Portal
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          mkdir -p "$HOME/.config/xdg-desktop-portal"
-          cat > "$HOME/.config/xdg-desktop-portal/gnome-portals.conf" <<'EOF'
-          [preferred]
-          default=gnome;gtk;
-          org.freedesktop.impl.portal.ScreenCast=gnome;
-          org.freedesktop.impl.portal.RemoteDesktop=gnome;
-          EOF
-          echo "GNOME portal configuration:"
-          cat "$HOME/.config/xdg-desktop-portal/gnome-portals.conf"
-
-      - name: Start GNOME Desktop
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export GDMSESSION=gnome-xorg
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          export LIBGL_ALWAYS_SOFTWARE=1
-          export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-          export MUTTER_DEBUG_DISABLE_HW_CURSORS=1
-          gnome-session --session=gnome-xorg > /tmp/gnome-session.log 2>&1 &
-          echo $! > /tmp/gnome-session.pid
-          sleep 15
-          if pgrep -x gnome-shell >/dev/null; then
-            echo "GNOME Shell is running."
-          else
-            echo "GNOME Shell did not start automatically. Starting it manually..."
-            gnome-shell --x11 --replace > /tmp/gnome-shell.log 2>&1 &
-            echo $! > /tmp/gnome-shell.pid
-            sleep 15
-          fi
-          echo "GNOME processes:"
-          ps aux | grep -E "gnome-session|gnome-shell|mutter" | grep -v grep || true
-
-      - name: Start PipeWire
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          pipewire > /tmp/pipewire.log 2>&1 &
-          echo $! > /tmp/pipewire.pid
-          sleep 4
-          wireplumber > /tmp/wireplumber.log 2>&1 &
-          echo $! > /tmp/wireplumber.pid
-          sleep 5
-          echo "PipeWire:"
-          ps aux | grep -E "pipewire|wireplumber" | grep -v grep || true
-          pactl info || true
-
-      - name: Start Desktop Portals
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          pkill xdg-desktop-portal || true
-          pkill xdg-desktop-portal-gnome || true
           sleep 3
-          /usr/libexec/xdg-desktop-portal > /tmp/xdg-portal.log 2>&1 &
-          echo $! > /tmp/xdg-portal.pid
-          sleep 3
-          /usr/libexec/xdg-desktop-portal-gnome > /tmp/xdg-portal-gnome.log 2>&1 &
-          echo $! > /tmp/xdg-portal-gnome.pid
-          sleep 8
-          echo "Portal processes:"
-          ps aux | grep xdg-desktop-portal | grep -v grep || true
-          echo "Portal logs:"
-          tail -n 50 /tmp/xdg-portal.log || true
-          tail -n 50 /tmp/xdg-portal-gnome.log || true
 
-      - name: Start SaaS Website
+          DISPLAY="${DISPLAY}" xdpyinfo | grep -E "dimensions|depth of root"
+          DISPLAY="${DISPLAY}" xrandr || true
+
+      - name: Prepare Chromium Profile
         shell: bash
         run: |
           set -e
-          python3 -m http.server 8080 --bind 127.0.0.1 > /tmp/webserver.log 2>&1 &
-          echo $! > /tmp/webserver.pid
-          sleep 3
-          curl -I http://127.0.0.1:8080
 
-      - name: Start Cloudflare SaaS Tunnel
+          rm -rf /tmp/chromium-profile
+          mkdir -p /tmp/chromium-profile
+
+      - name: Start Chromium Fullscreen
         shell: bash
         run: |
           set -e
-          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080 > /tmp/cloudflare-app.log 2>&1 &
-          echo $! > /tmp/cloudflared-app.pid
-          PUBLIC_APP_URL=""
-          for i in $(seq 1 60); do
-            PUBLIC_APP_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cloudflare-app.log | head -n 1 || true)
-            [ -n "$PUBLIC_APP_URL" ] && break
-            sleep 1
-          done
-          if [ -z "$PUBLIC_APP_URL" ]; then
-            cat /tmp/cloudflare-app.log
-            exit 1
-          fi
-          echo "PUBLIC_APP_URL=$PUBLIC_APP_URL" >> "$GITHUB_ENV"
-          echo "SaaS URL: $PUBLIC_APP_URL"
 
-      - name: Start VNC Server
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          VNC_PASSWORD="$(openssl rand -hex 4)"
-          mkdir -p "$HOME/.vnc"
-          x11vnc -storepasswd "$VNC_PASSWORD" "$HOME/.vnc/passwd"
-          chmod 600 "$HOME/.vnc/passwd"
-          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
-          x11vnc -display :99 -rfbport 5900 -rfbauth "$HOME/.vnc/passwd" -forever -shared -noxdamage -noxfixes -repeat -noshm -wait 5 -defer 5 > /tmp/x11vnc.log 2>&1 &
-          echo $! > /tmp/x11vnc.pid
-          sleep 5
-          echo "VNC server started."
+          echo "Opening: ${SITE_URL}"
 
-      - name: Install noVNC
-        shell: bash
-        run: |
-          set -e
-          sudo rm -rf /opt/noVNC
-          sudo git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC
-          python3 -m pip install --break-system-packages websockify
-          websockify --help > /dev/null
-          echo "websockify installed successfully."
+          chromium \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-session-crashed-bubble \
+            --disable-infobars \
+            --disable-translate \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-features=Translate,MediaRouter \
+            --force-device-scale-factor=1 \
+            --kiosk \
+            --start-fullscreen \
+            --window-position=0,0 \
+            --window-size="${WIDTH},${HEIGHT}" \
+            --user-data-dir=/tmp/chromium-profile \
+            "${SITE_URL}" \
+            > /tmp/chromium.log 2>&1 &
 
-      - name: Start noVNC
-        shell: bash
-        run: |
-          set -e
-          websockify --web=/opt/noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
-          echo $! > /tmp/novnc.pid
-          sleep 5
-          curl -I http://127.0.0.1:6080/vnc.html
-          echo "noVNC started."
+          CHROMIUM_PID=$!
+          echo "${CHROMIUM_PID}" > /tmp/chromium.pid
 
-      - name: Start Cloudflare Remote Desktop Tunnel
-        shell: bash
-        run: |
-          set -e
-          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > /tmp/cloudflare-remote.log 2>&1 &
-          echo $! > /tmp/cloudflared-remote.pid
-          REMOTE_URL=""
-          for i in $(seq 1 60); do
-            REMOTE_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cloudflare-remote.log | head -n 1 || true)
-            [ -n "$REMOTE_URL" ] && break
-            sleep 1
-          done
-          if [ -z "$REMOTE_URL" ]; then
-            cat /tmp/cloudflare-remote.log
-            exit 1
-          fi
-          echo "REMOTE_URL=$REMOTE_URL" >> "$GITHUB_ENV"
-          echo "Remote URL: $REMOTE_URL"
+          echo "Waiting for Chromium..."
 
-      - name: Launch OpenScreen
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          export LIBGL_ALWAYS_SOFTWARE=1
-          export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-          openscreen > /tmp/openscreen.log 2>&1 &
-          echo $! > /tmp/openscreen.pid
-          sleep 15
-          echo "OpenScreen process:"
-          ps aux | grep -i openscreen | grep -v grep || true
-
-      - name: Launch Chromium
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          chromium --no-sandbox --disable-dev-shm-usage --window-size=1920,1080 --start-maximized "$PUBLIC_APP_URL" > /tmp/chromium.log 2>&1 &
-          echo $! > /tmp/chromium.pid
-          sleep 10
-          echo "Chromium started."
-
-      - name: Show Remote Computer Information
-        shell: bash
-        run: |
-          {
-            echo "# 🖥️ Remote SaaS Demo Computer"
-            echo
-            echo "## 🌐 Remote Desktop"
-            echo
-            echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
-            echo
-            echo "## 🔐 VNC Password"
-            echo
-            echo "\`${VNC_PASSWORD}\`"
-            echo
-            echo "## 🌐 SaaS Product"
-            echo
-            echo "${PUBLIC_APP_URL}"
-            echo
-            echo "## 🖥️ Resolution"
-            echo
-            echo "1920 × 1080"
-            echo
-            echo "## 🎥 How to use"
-            echo
-            echo "Open the Remote Desktop URL."
-            echo "Enter the VNC password."
-            echo "Control the virtual computer with your mouse and keyboard."
-            echo "OpenScreen is already running inside the virtual computer."
-            echo "Start recording from OpenScreen."
-            echo "When the ScreenCast picker appears, choose the entire screen and confirm."
-            echo
-            echo "## ⏱️ Session"
-            echo
-            echo "${SESSION_MINUTES} minutes"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo
-          echo "=============================================="
-          echo "REMOTE COMPUTER READY"
-          echo "=============================================="
-          echo "Remote Desktop:"
-          echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
-          echo
-          echo "VNC Password:"
-          echo "${VNC_PASSWORD}"
-          echo
-          echo "SaaS Product:"
-          echo "${PUBLIC_APP_URL}"
-          echo
-          echo "Resolution: 1920x1080"
-          echo "=============================================="
-
-      - name: Verify ScreenCast Portal
-        shell: bash
-        run: |
-          set -e
-          export DISPLAY=:99
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=gnome
-          export XDG_SESSION_TYPE=x11
-          export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${UID}"
-          echo "Installed portal backends:"
-          find /usr/share/xdg-desktop-portal/portals -maxdepth 1 -type f -print | sort || true
-          echo
-          echo "GNOME portal:"
-          test -f /usr/share/xdg-desktop-portal/portals/gnome.portal && cat /usr/share/xdg-desktop-portal/portals/gnome.portal || true
-          echo
-          echo "Portal processes:"
-          ps aux | grep xdg-desktop-portal | grep -v grep || true
-
-      - name: Keep Computer Online
-        shell: bash
-        run: |
-          set -e
-          MINUTES="${SESSION_MINUTES:-60}"
-          [[ "$MINUTES" =~ ^[0-9]+$ ]] || { echo "Invalid session_minutes"; exit 1; }
-          TOTAL_SECONDS=$((MINUTES * 60))
-          echo "Remote computer is online for ${MINUTES} minutes."
-          for ((i=1; i<=TOTAL_SECONDS; i++)); do
-            sleep 1
-            if (( i % 30 == 0 )); then
-              echo "Remaining: $((TOTAL_SECONDS-i)) seconds"
+          for i in $(seq 1 30); do
+            if DISPLAY="${DISPLAY}" xdotool search --onlyvisible --class chromium >/dev/null 2>&1; then
+              echo "Chromium window detected."
+              break
             fi
+
+            sleep 1
           done
 
-      - name: Save Logs
-        if: always()
+          sleep 8
+
+          DISPLAY="${DISPLAY}" xdotool mousemove 1 1
+
+          echo "Chromium ready."
+
+      - name: Verify Recording Geometry
         shell: bash
         run: |
-          mkdir -p logs
-          cp /tmp/xvfb.log logs/ 2>/dev/null || true
-          cp /tmp/gnome-session.log logs/ 2>/dev/null || true
-          cp /tmp/gnome-shell.log logs/ 2>/dev/null || true
-          cp /tmp/pipewire.log logs/ 2>/dev/null || true
-          cp /tmp/wireplumber.log logs/ 2>/dev/null || true
-          cp /tmp/xdg-portal.log logs/ 2>/dev/null || true
-          cp /tmp/xdg-portal-gnome.log logs/ 2>/dev/null || true
-          cp /tmp/x11vnc.log logs/ 2>/dev/null || true
-          cp /tmp/novnc.log logs/ 2>/dev/null || true
-          cp /tmp/cloudflare-app.log logs/ 2>/dev/null || true
-          cp /tmp/cloudflare-remote.log logs/ 2>/dev/null || true
-          cp /tmp/openscreen.log logs/ 2>/dev/null || true
-          cp /tmp/chromium.log logs/ 2>/dev/null || true
-          cp /tmp/webserver.log logs/ 2>/dev/null || true
+          set -e
+
+          echo "Display: ${DISPLAY}"
+          echo "Resolution: ${WIDTH}x${HEIGHT}"
+          echo "FPS: ${FPS}"
+
+          DISPLAY="${DISPLAY}" xdpyinfo | grep dimensions
+
+          echo "Chromium windows:"
+          DISPLAY="${DISPLAY}" xdotool search --onlyvisible --class chromium getwindowname %@ || true
+
+      - name: Start FFmpeg Recording
+        shell: bash
+        run: |
+          set -e
+
+          rm -f recording.mp4
+
+          echo "Starting high-quality recording..."
+
+          ffmpeg \
+            -hide_banner \
+            -loglevel warning \
+            -f x11grab \
+            -draw_mouse 1 \
+            -framerate "${FPS}" \
+            -video_size "${WIDTH}x${HEIGHT}" \
+            -i "${DISPLAY}.0" \
+            -an \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 16 \
+            -tune animation \
+            -pix_fmt yuv420p \
+            -movflags +faststart \
+            recording.mp4 \
+            > /tmp/ffmpeg.log 2>&1 &
+
+          FFMPEG_PID=$!
+          echo "${FFMPEG_PID}" > /tmp/ffmpeg.pid
+
+          sleep 3
+
+          if ! kill -0 "${FFMPEG_PID}" 2>/dev/null; then
+            echo "FFmpeg failed to start."
+            cat /tmp/ffmpeg.log
+            exit 1
+          fi
+
+          echo "Recording started."
+
+      - name: Run SaaS Demo
+        shell: bash
+        run: |
+          set -e
+
+          export DISPLAY="${DISPLAY}"
+
+          echo "Starting demo sequence..."
+
+          # ============================================================
+          # 🎬 EDIT YOUR DEMO HERE
+          # ============================================================
+          #
+          # Coordinates are based on your selected resolution.
+          #
+          # Example:
+          #   mousemove X Y
+          #   sleep SECONDS
+          #   click 1
+          #
+          # Mouse button:
+          #   1 = left
+          #   2 = middle
+          #   3 = right
+          #
+          # Keyboard:
+          #   key ENTER
+          #   key TAB
+          #   key ESC
+          #   key CTRL+A
+          #
+          # Scroll:
+          #   click 4 = scroll up
+          #   click 5 = scroll down
+          #
+          # ============================================================
+
+          # Move into the page
+          xdotool mousemove --sync 960 540
+          sleep 2
+
+          # Hover
+          xdotool mousemove --sync 700 400
+          sleep 2
+
+          # Example click
+          xdotool click 1
+          sleep 2
+
+          # Example move
+          xdotool mousemove --sync 1100 400
+          sleep 1
+
+          # Example second click
+          xdotool click 1
+          sleep 3
+
+          # Example smooth-ish scroll sequence
+          xdotool mousemove --sync 1200 850
+          sleep 1
+
+          xdotool click 5
+          sleep 0.35
+          xdotool click 5
+          sleep 0.35
+          xdotool click 5
+          sleep 0.35
+          xdotool click 5
+          sleep 1.5
+
+          # Move somewhere else
+          xdotool mousemove --sync 500 350
+          sleep 2
+
+          # ============================================================
+          # END DEMO
+          # ============================================================
+
+          echo "Demo sequence finished."
+
+          # Give animations/transitions time to finish.
+          sleep 3
+
+      - name: Stop Recording
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f /tmp/ffmpeg.pid ]; then
+            FFMPEG_PID="$(cat /tmp/ffmpeg.pid)"
+
+            if kill -0 "${FFMPEG_PID}" 2>/dev/null; then
+              echo "Stopping FFmpeg..."
+              kill -INT "${FFMPEG_PID}" || true
+              wait "${FFMPEG_PID}" || true
+            fi
+          fi
+
+          echo
+          echo "Recording finished."
+
+          if [ ! -f recording.mp4 ]; then
+            echo "recording.mp4 was not created."
+            cat /tmp/ffmpeg.log || true
+            exit 1
+          fi
+
+          echo
+          echo "Video information:"
+          ffprobe \
+            -v error \
+            -select_streams v:0 \
+            -show_entries stream=width,height,r_frame_rate,codec_name,pix_fmt \
+            -of default=noprint_wrappers=1 \
+            recording.mp4
+
+          echo
+          echo "File size:"
+          ls -lh recording.mp4
+
+      - name: Upload Video
+        uses: actions/upload-artifact@v4
+        with:
+          name: saas-demo-recording
+          path: recording.mp4
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: remote-demo-logs
-          path: logs/
+          name: saas-demo-logs
+          path: |
+            /tmp/xvfb.log
+            /tmp/chromium.log
+            /tmp/ffmpeg.log
           if-no-files-found: ignore
           retention-days: 3
 
@@ -423,18 +334,21 @@ jobs:
         if: always()
         shell: bash
         run: |
-          kill "$(cat /tmp/openscreen.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/chromium.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/novnc.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/x11vnc.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/cloudflared-app.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/cloudflared-remote.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/pipewire.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/wireplumber.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/xdg-portal.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/xdg-portal-gnome.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/gnome-session.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/gnome-shell.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/xvfb.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/webserver.pid 2>/dev/null)" 2>/dev/null || true
+          set +e
+
+          if [ -f /tmp/ffmpeg.pid ]; then
+            kill -INT "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || true
+          fi
+
+          if [ -f /tmp/chromium.pid ]; then
+            kill "$(cat /tmp/chromium.pid)" 2>/dev/null || true
+          fi
+
+          if [ -f /tmp/xvfb.pid ]; then
+            kill "$(cat /tmp/xvfb.pid)" 2>/dev/null || true
+          fi
+
+          pkill -f chromium 2>/dev/null || true
+          pkill -f Xvfb 2>/dev/null || true
+
           echo "Cleanup complete."
