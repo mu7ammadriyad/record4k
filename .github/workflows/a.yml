@@ -62,7 +62,6 @@ jobs:
             websockify \
             nginx \
             ffmpeg \
-            ffprobe \
             curl \
             wget \
             openssl \
