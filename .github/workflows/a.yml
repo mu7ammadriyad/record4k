@@ -1,40 +1,37 @@
-name: Remote SaaS Demo Recorder2
+name: Professional SaaS Screen Recorder3
 
 on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: "رابط الموقع الذي سيتم فتحه في Chromium"
+        description: "URL of the SaaS application to record"
         required: true
+        type: string
         default: "https://example.com"
 
-      session_minutes:
-        description: "مدة تشغيل الكمبيوتر والتسجيل بالدقائق"
-        required: true
-        default: "60"
-
       width:
-        description: "عرض الشاشة"
+        description: "Virtual screen width"
         required: true
-        default: "1920"
+        type: string
+        default: "2560"
 
       height:
-        description: "ارتفاع الشاشة"
+        description: "Virtual screen height"
         required: true
-        default: "1080"
+        type: string
+        default: "1440"
 
       fps:
-        description: "عدد الإطارات في الثانية"
+        description: "Recording FPS"
         required: true
+        type: string
         default: "60"
 
-permissions:
-  contents: read
-
 jobs:
-  remote-demo:
+  recorder:
+    name: Professional Recording Studio
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 355
 
     env:
       DISPLAY: ":99"
@@ -42,247 +39,227 @@ jobs:
       HEIGHT: ${{ inputs.height }}
       FPS: ${{ inputs.fps }}
       SITE_URL: ${{ inputs.site_url }}
-      SESSION_MINUTES: ${{ inputs.session_minutes }}
 
     steps:
 
-      - name: Install Recording Environment
+      # ============================================================
+      # 1. INSTALL EVERYTHING
+      # ============================================================
+      - name: Install dependencies
         shell: bash
         run: |
           set -e
 
-          export DEBIAN_FRONTEND=noninteractive
+          echo "=========================================="
+          echo " Installing recording environment"
+          echo "=========================================="
 
           sudo apt-get update
 
-          sudo apt-get install -y \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xvfb \
             x11vnc \
-            novnc \
             websockify \
+            nginx \
+            ffmpeg \
+            ffprobe \
+            curl \
+            wget \
+            openssl \
+            ca-certificates \
             xdotool \
             x11-utils \
             x11-xserver-utils \
-            ffmpeg \
-            chromium \
-            fontconfig \
-            fonts-dejavu \
-            fonts-liberation \
+            fonts-noto \
             fonts-noto-core \
-            fonts-noto-extra \
-            fonts-noto-color-emoji \
+            fonts-noto-ui-core \
             fonts-noto-cjk \
-            ca-certificates \
-            curl \
-            wget \
-            openssl
+            fonts-noto-color-emoji \
+            fonts-liberation \
+            fonts-dejavu \
+            jq \
+            unzip \
+            python3 \
+            python3-pip
 
-          echo
-          echo "=============================================="
-          echo "Installed software"
-          echo "=============================================="
-          chromium --version
-          ffmpeg -version | head -n 1
-          xdotool --version
-          x11vnc -version 2>&1 | head -n 2 || true
-          websockify --version 2>&1 || true
-          fc-match sans
-          fc-match serif
-          fc-match "Noto Sans Arabic"
-          echo "=============================================="
+          echo ""
+          echo "Installing Chromium..."
 
-          fc-cache -f -v >/tmp/font-cache.log 2>&1 || true
+          sudo apt-get install -y chromium || true
 
-          echo
-          echo "Font cache refreshed."
-
-      - name: Start Virtual Display
-        shell: bash
-        run: |
-          set -e
-
-          echo "Starting Xvfb..."
-
-          Xvfb "${DISPLAY}" \
-            -screen 0 "${WIDTH}x${HEIGHT}x24" \
-            -dpi 96 \
-            -ac \
-            +extension GLX \
-            +extension RANDR \
-            +render \
-            -noreset \
-            > /tmp/xvfb.log 2>&1 &
-
-          XVFB_PID=$!
-          echo "${XVFB_PID}" > /tmp/xvfb.pid
-
-          sleep 3
-
-          echo
-          echo "=============================================="
-          echo "Virtual Display"
-          echo "=============================================="
-
-          DISPLAY="${DISPLAY}" xdpyinfo | grep -E "dimensions|depth of root"
-
-          DISPLAY="${DISPLAY}" xrandr || true
-
-          echo
-          echo "Display ready."
-
-      - name: Prepare Chromium Profile
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf /tmp/chromium-profile
-          mkdir -p /tmp/chromium-profile
-
-          cat > /tmp/chromium-preferences.json <<'EOF'
-          {
-            "webkit": {
-              "webprefs": {
-                "default_fixed_font_size": 16,
-                "default_font_size": 16
-              }
-            }
-          }
-          EOF
-
-          echo "Chromium profile prepared."
-
-      - name: Start Chromium
-        shell: bash
-        run: |
-          set -e
-
-          echo
-          echo "Opening:"
-          echo "${SITE_URL}"
-
-          chromium \
-            --no-sandbox \
-            --disable-dev-shm-usage \
-            --disable-session-crashed-bubble \
-            --disable-infobars \
-            --disable-translate \
-            --no-first-run \
-            --no-default-browser-check \
-            --disable-features=Translate,MediaRouter \
-            --force-device-scale-factor=1 \
-            --force-color-profile=srgb \
-            --kiosk \
-            --start-fullscreen \
-            --window-position=0,0 \
-            --window-size="${WIDTH},${HEIGHT}" \
-            --user-data-dir=/tmp/chromium-profile \
-            "${SITE_URL}" \
-            > /tmp/chromium.log 2>&1 &
-
-          CHROMIUM_PID=$!
-          echo "${CHROMIUM_PID}" > /tmp/chromium.pid
-
-          echo
-          echo "Waiting for Chromium..."
-
-          FOUND="false"
-
-          for i in $(seq 1 40); do
-            if DISPLAY="${DISPLAY}" xdotool search --onlyvisible --class chromium >/dev/null 2>&1; then
-              FOUND="true"
-              echo "Chromium window detected."
-              break
-            fi
-
-            sleep 1
-          done
-
-          if [ "${FOUND}" != "true" ]; then
-            echo "Chromium window was not detected."
-
-            echo
-            echo "Chromium log:"
-            cat /tmp/chromium.log || true
-
+          if command -v chromium >/dev/null 2>&1; then
+            echo "Chromium found: $(command -v chromium)"
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            echo "Chromium found: $(command -v chromium-browser)"
+          else
+            echo "Chromium was not found."
             exit 1
           fi
 
+          echo ""
+          echo "Installing Cloudflared..."
+
+          wget -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -O /tmp/cloudflared.deb
+
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
+
+          cloudflared --version
+
+          echo ""
+          echo "=========================================="
+          echo " Dependencies installed"
+          echo "=========================================="
+
+      # ============================================================
+      # 2. CREATE RECORDING SYSTEM
+      # ============================================================
+      - name: Start Recording Studio
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p /tmp/recording-studio
+          mkdir -p /tmp/recordings
+          mkdir -p /tmp/chromium-profile
+
+          STATE_FILE="/tmp/recording-studio/state.json"
+          CONTROLLER="/tmp/recording-studio/controller.py"
+          DASHBOARD="/tmp/recording-studio/index.html"
+          NGINX_CONF="/tmp/recording-studio/nginx.conf"
+          VNC_PASSWORD_FILE="/tmp/recording-studio/vnc.pass"
+          CLOUDFLARED_LOG="/tmp/recording-studio/cloudflared.log"
+
+          RECORDING_FILE="/tmp/recordings/saas-demo.mp4"
+
+          SESSION_TOKEN="$(openssl rand -hex 24)"
+          VNC_PASSWORD="$(openssl rand -hex 4)"
+
+          echo "$VNC_PASSWORD" > "$VNC_PASSWORD_FILE"
+          chmod 600 "$VNC_PASSWORD_FILE"
+
+          export SESSION_TOKEN
+          export VNC_PASSWORD
+          export STATE_FILE
+          export RECORDING_FILE
+
+          # ========================================================
+          # INITIAL STATE
+          # ========================================================
+          cat > "$STATE_FILE" <<EOF
+          {
+            "status": "booting",
+            "recording": false,
+            "finalized": false,
+            "file": null,
+            "duration": 0,
+            "size": 0,
+            "width": ${WIDTH},
+            "height": ${HEIGHT},
+            "fps": ${FPS}
+          }
+          EOF
+
+          # ========================================================
+          # X11 RESOURCE / DPI
+          # ========================================================
+          cat > /tmp/recording-studio/Xresources <<'EOF'
+          Xft.dpi: 120
+          Xft.antialias: true
+          Xft.hinting: true
+          Xft.hintstyle: hintslight
+          EOF
+
+          # ========================================================
+          # START VIRTUAL DISPLAY
+          # ========================================================
+          echo "Starting Xvfb..."
+
+          Xvfb "$DISPLAY" \
+            -screen 0 "${WIDTH}x${HEIGHT}x24" \
+            -dpi 120 \
+            -ac \
+            +extension RANDR \
+            > /tmp/recording-studio/xvfb.log 2>&1 &
+
+          XVFB_PID=$!
+
+          sleep 3
+
+          export XAUTHORITY="/tmp/recording-studio/.Xauthority"
+
+          touch "$XAUTHORITY"
+
+          xrdb -merge /tmp/recording-studio/Xresources || true
+
+          xsetroot -solid "#f5f5f5" || true
+
+          xrandr \
+            --fb "${WIDTH}x${HEIGHT}" \
+            >/tmp/recording-studio/xrandr.log 2>&1 || true
+
+          echo ""
+          echo "Virtual display:"
+          xdpyinfo | grep dimensions || true
+
+          # ========================================================
+          # CHROMIUM
+          # ========================================================
+          echo ""
+          echo "Starting Chromium..."
+
+          if command -v chromium >/dev/null 2>&1; then
+            CHROME_BIN="$(command -v chromium)"
+          else
+            CHROME_BIN="$(command -v chromium-browser)"
+          fi
+
+          export XCURSOR_SIZE=48
+
+          "$CHROME_BIN" \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-gpu-sandbox \
+            --disable-session-crashed-bubble \
+            --disable-infobars \
+            --disable-translate \
+            --disable-popup-blocking \
+            --disable-notifications \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-features=Translate,MediaRouter \
+            --disable-background-networking \
+            --disable-component-update \
+            --disable-sync \
+            --disable-default-apps \
+            --disable-extensions \
+            --force-device-scale-factor=1.25 \
+            --force-color-profile=srgb \
+            --high-dpi-support=1 \
+            --lang=ar-EG \
+            --kiosk \
+            --start-fullscreen \
+            --window-position=0,0 \
+            --window-size=2048,1152 \
+            --user-data-dir=/tmp/chromium-profile \
+            "$SITE_URL" \
+            > /tmp/recording-studio/chromium.log 2>&1 &
+
+          CHROME_PID=$!
+
           sleep 8
 
-          DISPLAY="${DISPLAY}" xdotool mousemove 1 1
-
-          echo
-          echo "Chromium is ready."
-
-          echo
-          echo "Visible Chromium windows:"
-          DISPLAY="${DISPLAY}" \
-            xdotool search --onlyvisible --class chromium \
-            getwindowname %@ || true
-
-      - name: Verify Fonts
-        shell: bash
-        run: |
-          set -e
-
-          echo
-          echo "=============================================="
-          echo "Font Environment"
-          echo "=============================================="
-
-          echo
-          echo "Generic sans:"
-          fc-match sans
-
-          echo
-          echo "Noto Sans:"
-          fc-match "Noto Sans"
-
-          echo
-          echo "Noto Sans Arabic:"
-          fc-match "Noto Sans Arabic"
-
-          echo
-          echo "Liberation Sans:"
-          fc-match "Liberation Sans"
-
-          echo
-          echo "DejaVu Sans:"
-          fc-match "DejaVu Sans"
-
-          echo
-          echo "Fontconfig:"
-          fc-match --format='%{family} | %{style} | %{file}\n' sans
-
-          echo
-          echo "=============================================="
-
-      - name: Start VNC Server
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p "$HOME/.vnc"
-
-          VNC_PASSWORD="$(openssl rand -hex 6)"
-
-          echo "${VNC_PASSWORD}" > /tmp/vnc-password.txt
-
-          x11vnc -storepasswd \
-            "${VNC_PASSWORD}" \
-            "$HOME/.vnc/passwd"
-
-          chmod 600 "$HOME/.vnc/passwd"
-
-          echo "VNC_PASSWORD=${VNC_PASSWORD}" >> "$GITHUB_ENV"
-
-          echo
+          # ========================================================
+          # X11VNC
+          # ========================================================
+          echo ""
           echo "Starting x11vnc..."
 
           x11vnc \
-            -display "${DISPLAY}" \
+            -display "$DISPLAY" \
+            -rfbauth "$VNC_PASSWORD_FILE" \
             -rfbport 5900 \
-            -rfbauth "$HOME/.vnc/passwd" \
             -localhost \
             -forever \
             -shared \
@@ -292,471 +269,1616 @@ jobs:
             -noshm \
             -wait 5 \
             -defer 5 \
-            > /tmp/x11vnc.log 2>&1 &
+            -cursor arrow \
+            > /tmp/recording-studio/x11vnc.log 2>&1 &
 
           X11VNC_PID=$!
-          echo "${X11VNC_PID}" > /tmp/x11vnc.pid
 
-          sleep 5
+          sleep 2
 
-          if ! kill -0 "${X11VNC_PID}" 2>/dev/null; then
-            echo "x11vnc failed."
+          # ========================================================
+          # WEBSOCKIFY
+          # ========================================================
+          echo ""
+          echo "Starting Websockify..."
 
-            echo
-            cat /tmp/x11vnc.log || true
-
-            exit 1
-          fi
-
-          echo "x11vnc is running."
-
-      - name: Start noVNC
-        shell: bash
-        run: |
-          set -e
-
-          echo "Starting noVNC..."
-
-          if [ -d "/usr/share/novnc" ]; then
-            NOVNC_PATH="/usr/share/novnc"
-          elif [ -d "/usr/share/noVNC" ]; then
-            NOVNC_PATH="/usr/share/noVNC"
-          else
-            echo "noVNC directory was not found."
-
-            dpkg -L novnc || true
-
-            exit 1
-          fi
-
-          echo "noVNC path: ${NOVNC_PATH}"
-
-          nohup websockify \
-            --web="${NOVNC_PATH}" \
+          websockify \
             6080 \
             127.0.0.1:5900 \
-            > /tmp/novnc.log 2>&1 < /dev/null &
+            > /tmp/recording-studio/websockify.log 2>&1 &
 
-          NOVNC_PID=$!
-          echo "${NOVNC_PID}" > /tmp/novnc.pid
+          WEBSOCKIFY_PID=$!
 
-          sleep 5
+          sleep 2
 
-          curl -fsS \
-            http://127.0.0.1:6080/vnc.html \
-            >/dev/null
+          # ========================================================
+          # CONTROLLER PYTHON
+          # ========================================================
+          cat > "$CONTROLLER" <<'PYTHON'
+          import json
+          import os
+          import signal
+          import subprocess
+          import threading
+          import time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from urllib.parse import urlparse
 
-          echo "noVNC is running."
+          STATE_FILE = os.environ["STATE_FILE"]
+          SESSION_TOKEN = os.environ["SESSION_TOKEN"]
+          RECORDING_FILE = os.environ["RECORDING_FILE"]
 
-      - name: Install Cloudflared
-        shell: bash
-        run: |
-          set -e
+          WIDTH = int(os.environ.get("WIDTH", "2560"))
+          HEIGHT = int(os.environ.get("HEIGHT", "1440"))
+          FPS = int(os.environ.get("FPS", "60"))
 
-          echo "Downloading cloudflared..."
+          ffmpeg_process = None
+          recording_started_at = None
+          state_lock = threading.Lock()
+          shutdown_event = threading.Event()
 
-          wget -q \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
-            -O /tmp/cloudflared.deb
 
-          sudo dpkg -i /tmp/cloudflared.deb || \
-            sudo apt-get install -f -y
+          def load_state():
+              try:
+                  with open(STATE_FILE, "r", encoding="utf-8") as f:
+                      return json.load(f)
+              except Exception:
+                  return {
+                      "status": "booting",
+                      "recording": False,
+                      "finalized": False
+                  }
 
-          cloudflared --version
 
-      - name: Start Cloudflare Quick Tunnel
-        shell: bash
-        run: |
-          set -e
+          def save_state(state):
+              temp = STATE_FILE + ".tmp"
 
-          echo
-          echo "=============================================="
-          echo "Starting Cloudflare Quick Tunnel"
-          echo "=============================================="
+              with open(temp, "w", encoding="utf-8") as f:
+                  json.dump(state, f, ensure_ascii=False, indent=2)
 
-          nohup cloudflared tunnel \
-            --no-autoupdate \
-            --url http://127.0.0.1:6080 \
-            > /tmp/cloudflared.log 2>&1 < /dev/null &
+              os.replace(temp, STATE_FILE)
 
-          CLOUDFLARED_PID=$!
-          echo "${CLOUDFLARED_PID}" > /tmp/cloudflared.pid
 
-          REMOTE_URL=""
+          def get_token(handler):
+              auth = handler.headers.get("Authorization", "")
 
-          echo "Waiting for trycloudflare.com URL..."
+              if auth.startswith("Bearer "):
+                  return auth[7:].strip()
 
-          for i in $(seq 1 60); do
-            REMOTE_URL="$(
-              grep -oE \
-                'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
-                /tmp/cloudflared.log |
-              head -n 1 || true
-            )"
+              return handler.headers.get("X-Recording-Token", "")
 
-            if [ -n "${REMOTE_URL}" ]; then
-              break
-            fi
 
-            sleep 1
-          done
+          def authorized(handler):
+              return get_token(handler) == SESSION_TOKEN
 
-          if [ -z "${REMOTE_URL}" ]; then
-            echo "Cloudflare tunnel did not start."
 
-            echo
-            echo "Cloudflared log:"
-            cat /tmp/cloudflared.log || true
+          def send_json(handler, payload, status=200):
+              raw = json.dumps(
+                  payload,
+                  ensure_ascii=False
+              ).encode("utf-8")
 
-            exit 1
-          fi
+              handler.send_response(status)
+              handler.send_header(
+                  "Content-Type",
+                  "application/json; charset=utf-8"
+              )
+              handler.send_header(
+                  "Content-Length",
+                  str(len(raw))
+              )
+              handler.send_header(
+                  "Cache-Control",
+                  "no-store"
+              )
+              handler.end_headers()
 
-          echo "REMOTE_URL=${REMOTE_URL}" >> "$GITHUB_ENV"
+              handler.wfile.write(raw)
 
-          echo
-          echo "=============================================="
-          echo "REMOTE COMPUTER READY"
-          echo "=============================================="
-          echo
-          echo "Remote Desktop:"
-          echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
-          echo
-          echo "Password:"
-          echo "${VNC_PASSWORD}"
-          echo
-          echo "Site:"
-          echo "${SITE_URL}"
-          echo
-          echo "Resolution:"
-          echo "${WIDTH}x${HEIGHT}"
-          echo
-          echo "FPS:"
-          echo "${FPS}"
-          echo
-          echo "=============================================="
 
-          cat > /tmp/remote-info.txt <<EOF
-          REMOTE COMPUTER READY
+          def ffprobe_video():
+              if not os.path.exists(RECORDING_FILE):
+                  return {
+                      "valid": False,
+                      "error": "Recording file does not exist."
+                  }
 
-          Remote Desktop:
-          ${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale
+              try:
+                  command = [
+                      "ffprobe",
+                      "-v",
+                      "error",
+                      "-show_entries",
+                      "format=duration,size",
+                      "-show_entries",
+                      "stream=width,height,r_frame_rate,codec_name",
+                      "-of",
+                      "json",
+                      RECORDING_FILE
+                  ]
 
-          VNC Password:
-          ${VNC_PASSWORD}
+                  result = subprocess.run(
+                      command,
+                      capture_output=True,
+                      text=True,
+                      timeout=30
+                  )
 
-          Site:
-          ${SITE_URL}
+                  if result.returncode != 0:
+                      return {
+                          "valid": False,
+                          "error": result.stderr[-1000:]
+                      }
 
-          Resolution:
-          ${WIDTH}x${HEIGHT}
+                  data = json.loads(result.stdout)
 
-          FPS:
-          ${FPS}
+                  duration = 0
 
-          Session:
-          ${SESSION_MINUTES} minutes
+                  if "format" in data:
+                      duration = float(
+                          data["format"].get("duration") or 0
+                      )
+
+                  size = os.path.getsize(RECORDING_FILE)
+
+                  stream = {}
+
+                  if data.get("streams"):
+                      stream = data["streams"][0]
+
+                  return {
+                      "valid": duration > 0 and size > 10000,
+                      "duration": duration,
+                      "size": size,
+                      "width": stream.get("width"),
+                      "height": stream.get("height"),
+                      "fps": stream.get("r_frame_rate"),
+                      "codec": stream.get("codec_name")
+                  }
+
+              except Exception as e:
+                  return {
+                      "valid": False,
+                      "error": str(e)
+                  }
+
+
+          def start_recording():
+              global ffmpeg_process
+              global recording_started_at
+
+              with state_lock:
+                  if ffmpeg_process is not None:
+                      if ffmpeg_process.poll() is None:
+                          return {
+                              "ok": False,
+                              "error": "Recording is already running."
+                          }
+
+                  if os.path.exists(RECORDING_FILE):
+                      os.remove(RECORDING_FILE)
+
+                  command = [
+                      "ffmpeg",
+                      "-hide_banner",
+                      "-loglevel",
+                      "warning",
+
+                      "-f",
+                      "x11grab",
+
+                      "-draw_mouse",
+                      "1",
+
+                      "-framerate",
+                      str(FPS),
+
+                      "-video_size",
+                      f"{WIDTH}x{HEIGHT}",
+
+                      "-i",
+                      ":99.0",
+
+                      "-an",
+
+                      "-c:v",
+                      "libx264",
+
+                      "-preset",
+                      "faster",
+
+                      "-crf",
+                      "15",
+
+                      "-tune",
+                      "animation",
+
+                      "-pix_fmt",
+                      "yuv420p",
+
+                      "-profile:v",
+                      "high",
+
+                      "-level",
+                      "5.1",
+
+                      "-movflags",
+                      "+faststart",
+
+                      "-y",
+                      RECORDING_FILE
+                  ]
+
+                  ffmpeg_process = subprocess.Popen(
+                      command,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.PIPE,
+                      text=True
+                  )
+
+                  recording_started_at = time.time()
+
+                  state = load_state()
+
+                  state.update({
+                      "status": "recording",
+                      "recording": True,
+                      "finalized": False,
+                      "file": None,
+                      "duration": 0,
+                      "size": 0,
+                      "started_at": recording_started_at
+                  })
+
+                  save_state(state)
+
+                  return {
+                      "ok": True,
+                      "status": "recording"
+                  }
+
+
+          def stop_recording():
+              global ffmpeg_process
+              global recording_started_at
+
+              with state_lock:
+                  if ffmpeg_process is None:
+                      return {
+                          "ok": False,
+                          "error": "No recording process exists."
+                      }
+
+                  if ffmpeg_process.poll() is not None:
+                      result = ffprobe_video()
+
+                      state = load_state()
+
+                      state.update({
+                          "status": "finished",
+                          "recording": False,
+                          "finalized": result.get("valid", False),
+                          "file": RECORDING_FILE if result.get("valid") else None,
+                          "duration": result.get("duration", 0),
+                          "size": result.get("size", 0)
+                      })
+
+                      save_state(state)
+
+                      shutdown_event.set()
+
+                      return {
+                          "ok": result.get("valid", False),
+                          **result
+                      }
+
+                  try:
+                      ffmpeg_process.send_signal(signal.SIGINT)
+
+                      try:
+                          ffmpeg_process.wait(timeout=45)
+
+                      except subprocess.TimeoutExpired:
+                          ffmpeg_process.kill()
+                          ffmpeg_process.wait(timeout=10)
+
+                  except Exception:
+                      try:
+                          ffmpeg_process.kill()
+                      except Exception:
+                          pass
+
+                  result = ffprobe_video()
+
+                  state = load_state()
+
+                  state.update({
+                      "status": "finished" if result.get("valid") else "error",
+                      "recording": False,
+                      "finalized": result.get("valid", False),
+                      "file": RECORDING_FILE if result.get("valid") else None,
+                      "duration": result.get("duration", 0),
+                      "size": result.get("size", 0)
+                  })
+
+                  save_state(state)
+
+                  shutdown_event.set()
+
+                  return {
+                      "ok": result.get("valid", False),
+                      **result
+                  }
+
+
+          class Handler(BaseHTTPRequestHandler):
+
+              def log_message(self, format, *args):
+                  return
+
+              def do_GET(self):
+                  parsed = urlparse(self.path)
+
+                  if parsed.path == "/api/record/status":
+
+                      if not authorized(self):
+                          send_json(
+                              self,
+                              {
+                                  "ok": False,
+                                  "error": "Unauthorized"
+                              },
+                              401
+                          )
+                          return
+
+                      state = load_state()
+
+                      if state.get("recording") and recording_started_at:
+                          state["elapsed"] = (
+                              time.time() - recording_started_at
+                          )
+                      else:
+                          state["elapsed"] = state.get("duration", 0)
+
+                      send_json(
+                          self,
+                          {
+                              "ok": True,
+                              **state
+                          }
+                      )
+
+                      return
+
+                  if parsed.path == "/api/health":
+                      send_json(
+                          self,
+                          {
+                              "ok": True,
+                              "service": "recording-studio"
+                          }
+                      )
+                      return
+
+                  send_json(
+                      self,
+                      {
+                          "ok": False,
+                          "error": "Not found"
+                      },
+                      404
+                  )
+
+
+              def do_POST(self):
+                  parsed = urlparse(self.path)
+
+                  if not authorized(self):
+                      send_json(
+                          self,
+                          {
+                              "ok": False,
+                              "error": "Unauthorized"
+                          },
+                          401
+                      )
+                      return
+
+                  if parsed.path == "/api/record/start":
+                      result = start_recording()
+                      send_json(
+                          self,
+                          result,
+                          200 if result.get("ok") else 409
+                      )
+                      return
+
+                  if parsed.path == "/api/record/stop":
+                      result = stop_recording()
+                      send_json(
+                          self,
+                          result,
+                          200 if result.get("ok") else 409
+                      )
+                      return
+
+                  send_json(
+                      self,
+                      {
+                          "ok": False,
+                          "error": "Not found"
+                      },
+                      404
+                  )
+
+
+          server = ThreadingHTTPServer(
+              ("127.0.0.1", 8081),
+              Handler
+          )
+
+
+          state = load_state()
+
+          state.update({
+              "status": "ready",
+              "recording": False,
+              "finalized": False
+          })
+
+          save_state(state)
+
+          def shutdown():
+              try:
+                  server.shutdown()
+              except Exception:
+                  pass
+
+
+          threading.Thread(
+              target=shutdown_event.wait,
+              daemon=True
+          ).start()
+
+
+          def shutdown_watcher():
+              shutdown_event.wait()
+
+              try:
+                  server.shutdown()
+              except Exception:
+                  pass
+
+
+          threading.Thread(
+              target=shutdown_watcher,
+              daemon=True
+          ).start()
+
+
+          print("Recording controller started on 127.0.0.1:8081")
+
+          try:
+              server.serve_forever()
+
+          except KeyboardInterrupt:
+              pass
+
+          finally:
+              server.server_close()
+          PYTHON
+
+          # ========================================================
+          # PROFESSIONAL DASHBOARD
+          # ========================================================
+          cat > "$DASHBOARD" <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta
+              name="viewport"
+              content="width=device-width,initial-scale=1,maximum-scale=1"
+            >
+
+            <title>Recording Studio</title>
+
+            <style>
+              * {
+                box-sizing: border-box;
+              }
+
+              html,
+              body {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                background: #f5f5f5;
+                color: #171717;
+                font-family:
+                  Inter,
+                  "Noto Sans",
+                  "Noto Sans Arabic",
+                  Arial,
+                  sans-serif;
+              }
+
+              body {
+                overflow: hidden;
+              }
+
+              .app {
+                width: 100%;
+                height: 100%;
+                display: flex;
+                flex-direction: column;
+              }
+
+              .topbar {
+                height: 72px;
+                flex: 0 0 72px;
+                background: #ffffff;
+                border-bottom: 1px solid #e5e5e5;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 0 26px;
+              }
+
+              .brand {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+              }
+
+              .brand-mark {
+                width: 34px;
+                height: 34px;
+                border-radius: 10px;
+                background: #171717;
+                color: white;
+                display: grid;
+                place-items: center;
+                font-size: 15px;
+                font-weight: 800;
+              }
+
+              .brand-title {
+                font-size: 15px;
+                font-weight: 750;
+                letter-spacing: -0.02em;
+              }
+
+              .brand-subtitle {
+                font-size: 11px;
+                color: #737373;
+                margin-top: 2px;
+              }
+
+              .status {
+                display: flex;
+                align-items: center;
+                gap: 9px;
+                border: 1px solid #e5e5e5;
+                border-radius: 999px;
+                padding: 8px 13px;
+                background: #fafafa;
+                font-size: 12px;
+                font-weight: 650;
+              }
+
+              .dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: #a3a3a3;
+              }
+
+              .dot.ready {
+                background: #22c55e;
+              }
+
+              .dot.recording {
+                background: #ef4444;
+                box-shadow: 0 0 0 4px rgba(239,68,68,.10);
+              }
+
+              .main {
+                flex: 1;
+                min-height: 0;
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) 330px;
+                gap: 18px;
+                padding: 18px;
+              }
+
+              .screen-card {
+                min-width: 0;
+                min-height: 0;
+                background: #171717;
+                border-radius: 18px;
+                overflow: hidden;
+                border: 1px solid #262626;
+                display: flex;
+                flex-direction: column;
+              }
+
+              .screen-header {
+                height: 48px;
+                flex: 0 0 48px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 0 15px;
+                color: #d4d4d4;
+                border-bottom: 1px solid #2a2a2a;
+                background: #1c1c1c;
+              }
+
+              .screen-label {
+                font-size: 12px;
+                font-weight: 650;
+              }
+
+              .screen-meta {
+                color: #737373;
+                font-size: 11px;
+              }
+
+              .screen {
+                flex: 1;
+                min-height: 0;
+                background: #000;
+                position: relative;
+              }
+
+              .screen iframe {
+                position: absolute;
+                inset: 0;
+                width: 100%;
+                height: 100%;
+                border: 0;
+                background: #000;
+              }
+
+              .sidebar {
+                min-height: 0;
+                background: #ffffff;
+                border: 1px solid #e5e5e5;
+                border-radius: 18px;
+                padding: 20px;
+                display: flex;
+                flex-direction: column;
+                overflow: auto;
+              }
+
+              .section-label {
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: .10em;
+                text-transform: uppercase;
+                color: #737373;
+                margin-bottom: 10px;
+              }
+
+              .record-state {
+                border: 1px solid #e5e5e5;
+                border-radius: 14px;
+                padding: 16px;
+                background: #fafafa;
+                margin-bottom: 18px;
+              }
+
+              .record-state-title {
+                font-size: 12px;
+                color: #737373;
+                margin-bottom: 7px;
+              }
+
+              .record-state-value {
+                font-size: 25px;
+                line-height: 1;
+                font-weight: 800;
+                letter-spacing: -0.04em;
+              }
+
+              .timer {
+                margin-top: 10px;
+                font-family:
+                  "SFMono-Regular",
+                  Consolas,
+                  monospace;
+                font-size: 20px;
+                font-weight: 650;
+              }
+
+              .buttons {
+                display: grid;
+                gap: 10px;
+                margin-bottom: 22px;
+              }
+
+              button {
+                appearance: none;
+                border: 0;
+                cursor: pointer;
+                width: 100%;
+                height: 50px;
+                border-radius: 12px;
+                font-size: 13px;
+                font-weight: 750;
+                transition: .15s ease;
+              }
+
+              button:active {
+                transform: scale(.985);
+              }
+
+              button:disabled {
+                cursor: not-allowed;
+                opacity: .40;
+              }
+
+              .start {
+                background: #171717;
+                color: #ffffff;
+              }
+
+              .start:hover:not(:disabled) {
+                background: #303030;
+              }
+
+              .stop {
+                background: #fef2f2;
+                color: #b91c1c;
+                border: 1px solid #fecaca;
+              }
+
+              .stop:hover:not(:disabled) {
+                background: #fee2e2;
+              }
+
+              .info {
+                display: grid;
+                gap: 1px;
+                background: #e5e5e5;
+                border: 1px solid #e5e5e5;
+                border-radius: 14px;
+                overflow: hidden;
+              }
+
+              .info-row {
+                background: #ffffff;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 12px 13px;
+                font-size: 12px;
+              }
+
+              .info-key {
+                color: #737373;
+              }
+
+              .info-value {
+                font-weight: 700;
+                color: #262626;
+              }
+
+              .message {
+                margin-top: auto;
+                padding-top: 18px;
+                color: #737373;
+                font-size: 11px;
+                line-height: 1.55;
+              }
+
+              .ready-text {
+                color: #16a34a;
+              }
+
+              .recording-text {
+                color: #dc2626;
+              }
+
+              .finished-text {
+                color: #525252;
+              }
+
+              @media(max-width:900px) {
+                .main {
+                  grid-template-columns: 1fr;
+                }
+
+                .sidebar {
+                  display: none;
+                }
+
+                .screen-card {
+                  border-radius: 12px;
+                }
+              }
+            </style>
+          </head>
+
+          <body>
+
+          <div class="app">
+
+            <header class="topbar">
+
+              <div class="brand">
+                <div class="brand-mark">R</div>
+
+                <div>
+                  <div class="brand-title">
+                    Recording Studio
+                  </div>
+
+                  <div class="brand-subtitle">
+                    SaaS product demonstration environment
+                  </div>
+                </div>
+              </div>
+
+              <div class="status">
+                <span id="dot" class="dot"></span>
+                <span id="connection">Connecting</span>
+              </div>
+
+            </header>
+
+            <main class="main">
+
+              <section class="screen-card">
+
+                <div class="screen-header">
+                  <span class="screen-label">
+                    Remote Desktop
+                  </span>
+
+                  <span class="screen-meta">
+                    ${WIDTH} × ${HEIGHT} · ${FPS} FPS
+                  </span>
+                </div>
+
+                <div class="screen">
+                  <iframe
+                    id="vnc"
+                    src="/vnc/vnc.html?autoconnect=true&resize=scale&path=websockify&password=${VNC_PASSWORD}"
+                    allow="fullscreen"
+                  ></iframe>
+                </div>
+
+              </section>
+
+              <aside class="sidebar">
+
+                <div class="section-label">
+                  Recording
+                </div>
+
+                <div class="record-state">
+
+                  <div class="record-state-title">
+                    Current state
+                  </div>
+
+                  <div
+                    id="state"
+                    class="record-state-value"
+                  >
+                    READY
+                  </div>
+
+                  <div
+                    id="timer"
+                    class="timer"
+                  >
+                    00:00:00
+                  </div>
+
+                </div>
+
+                <div class="buttons">
+
+                  <button
+                    id="start"
+                    class="start"
+                    onclick="startRecording()"
+                  >
+                    START RECORDING
+                  </button>
+
+                  <button
+                    id="stop"
+                    class="stop"
+                    onclick="stopRecording()"
+                    disabled
+                  >
+                    STOP & SAVE
+                  </button>
+
+                </div>
+
+                <div class="section-label">
+                  Session
+                </div>
+
+                <div class="info">
+
+                  <div class="info-row">
+                    <span class="info-key">Resolution</span>
+                    <span class="info-value">
+                      ${WIDTH}×${HEIGHT}
+                    </span>
+                  </div>
+
+                  <div class="info-row">
+                    <span class="info-key">Frame rate</span>
+                    <span class="info-value">
+                      ${FPS} FPS
+                    </span>
+                  </div>
+
+                  <div class="info-row">
+                    <span class="info-key">Codec</span>
+                    <span class="info-value">
+                      H.264
+                    </span>
+                  </div>
+
+                  <div class="info-row">
+                    <span class="info-key">Quality</span>
+                    <span class="info-value">
+                      CRF 15
+                    </span>
+                  </div>
+
+                  <div class="info-row">
+                    <span class="info-key">Capture</span>
+                    <span class="info-value">
+                      X11 Direct
+                    </span>
+                  </div>
+
+                </div>
+
+                <div
+                  id="message"
+                  class="message"
+                >
+                  The remote desktop is ready.
+                  Press START RECORDING when you are ready
+                  to begin the demonstration.
+                </div>
+
+              </aside>
+
+            </main>
+
+          </div>
+
+          <script>
+            const TOKEN = "${SESSION_TOKEN}";
+
+            let startedAt = null;
+            let timerInterval = null;
+
+            const headers = {
+              "X-Recording-Token": TOKEN
+            };
+
+            function formatTime(seconds) {
+              seconds = Math.max(0, Math.floor(seconds));
+
+              const h = String(
+                Math.floor(seconds / 3600)
+              ).padStart(2, "0");
+
+              const m = String(
+                Math.floor((seconds % 3600) / 60)
+              ).padStart(2, "0");
+
+              const s = String(
+                seconds % 60
+              ).padStart(2, "0");
+
+              return `${h}:${m}:${s}`;
+            }
+
+            function setState(state) {
+              const stateEl =
+                document.getElementById("state");
+
+              const dot =
+                document.getElementById("dot");
+
+              const connection =
+                document.getElementById("connection");
+
+              const start =
+                document.getElementById("start");
+
+              const stop =
+                document.getElementById("stop");
+
+              const message =
+                document.getElementById("message");
+
+              stateEl.className =
+                "record-state-value";
+
+              dot.className = "dot";
+
+              if (state === "ready") {
+                stateEl.textContent = "READY";
+                dot.classList.add("ready");
+                connection.textContent = "Online";
+
+                start.disabled = false;
+                stop.disabled = true;
+
+                message.className = "message ready-text";
+                message.textContent =
+                  "The remote desktop is ready. " +
+                  "Press START RECORDING when you are ready.";
+              }
+
+              else if (state === "recording") {
+                stateEl.textContent = "RECORDING";
+                dot.classList.add("recording");
+                connection.textContent = "Recording";
+
+                start.disabled = true;
+                stop.disabled = false;
+
+                message.className =
+                  "message recording-text";
+
+                message.textContent =
+                  "Recording is active. " +
+                  "Perform your product demonstration, " +
+                  "then press STOP & SAVE.";
+              }
+
+              else if (state === "finished") {
+                stateEl.textContent = "SAVED";
+                dot.classList.add("ready");
+                connection.textContent = "Finished";
+
+                start.disabled = true;
+                stop.disabled = true;
+
+                message.className =
+                  "message finished-text";
+
+                message.textContent =
+                  "The recording has been finalized successfully. " +
+                  "GitHub Actions will upload the MP4 artifact.";
+              }
+
+              else {
+                stateEl.textContent =
+                  state.toUpperCase();
+
+                connection.textContent =
+                  "Online";
+              }
+            }
+
+            async function api(url, options = {}) {
+              options.headers = {
+                ...headers,
+                ...(options.headers || {})
+              };
+
+              const response =
+                await fetch(url, options);
+
+              return await response.json();
+            }
+
+            async function refreshStatus() {
+              try {
+                const data =
+                  await api("/api/record/status");
+
+                if (!data.ok) {
+                  throw new Error(data.error);
+                }
+
+                document.getElementById("connection")
+                  .textContent = "Online";
+
+                if (data.recording) {
+                  if (!startedAt) {
+                    startedAt =
+                      Date.now() -
+                      ((data.elapsed || 0) * 1000);
+                  }
+
+                  startTimer();
+                  setState("recording");
+                }
+
+                else if (data.finalized) {
+                  startedAt = null;
+                  stopTimer();
+
+                  document.getElementById("timer")
+                    .textContent =
+                    formatTime(data.duration || 0);
+
+                  setState("finished");
+                }
+
+                else {
+                  setState("ready");
+                }
+
+              } catch (error) {
+                document.getElementById("connection")
+                  .textContent = "Connection error";
+              }
+            }
+
+            function startTimer() {
+              if (timerInterval) return;
+
+              timerInterval =
+                setInterval(() => {
+
+                  if (!startedAt) return;
+
+                  const elapsed =
+                    (Date.now() - startedAt) / 1000;
+
+                  document.getElementById("timer")
+                    .textContent =
+                    formatTime(elapsed);
+
+                }, 250);
+            }
+
+            function stopTimer() {
+              if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+              }
+            }
+
+            async function startRecording() {
+              const button =
+                document.getElementById("start");
+
+              button.disabled = true;
+
+              try {
+                const data =
+                  await api(
+                    "/api/record/start",
+                    {
+                      method: "POST"
+                    }
+                  );
+
+                if (!data.ok) {
+                  alert(data.error || "Could not start recording.");
+                  button.disabled = false;
+                  return;
+                }
+
+                startedAt = Date.now();
+
+                document.getElementById("timer")
+                  .textContent = "00:00:00";
+
+                startTimer();
+                setState("recording");
+
+              } catch (error) {
+                alert(
+                  "Could not start recording."
+                );
+
+                button.disabled = false;
+              }
+            }
+
+            async function stopRecording() {
+              const button =
+                document.getElementById("stop");
+
+              button.disabled = true;
+
+              document.getElementById("state")
+                .textContent = "FINALIZING";
+
+              document.getElementById("message")
+                .textContent =
+                "Finishing the MP4 safely. Please wait...";
+
+              try {
+                const data =
+                  await api(
+                    "/api/record/stop",
+                    {
+                      method: "POST"
+                    }
+                  );
+
+                stopTimer();
+
+                if (!data.ok) {
+                  alert(
+                    data.error ||
+                    "The recording could not be finalized."
+                  );
+
+                  await refreshStatus();
+                  return;
+                }
+
+                document.getElementById("timer")
+                  .textContent =
+                  formatTime(data.duration || 0);
+
+                setState("finished");
+
+              } catch (error) {
+                alert(
+                  "Connection lost while finalizing the recording."
+                );
+              }
+            }
+
+            refreshStatus();
+
+            setInterval(
+              refreshStatus,
+              2000
+            );
+          </script>
+
+          </body>
+          </html>
+          HTML
+
+          # ========================================================
+          # NGINX CONFIGURATION
+          # ========================================================
+          cat > "$NGINX_CONF" <<EOF
+          worker_processes 1;
+
+          events {
+              worker_connections 1024;
+          }
+
+          http {
+
+              include /etc/nginx/mime.types;
+
+              sendfile on;
+
+              map \$http_upgrade \$connection_upgrade {
+                  default upgrade;
+                  '' close;
+              }
+
+              server {
+
+                  listen 8080;
+                  server_name _;
+
+                  client_max_body_size 100M;
+
+                  location / {
+                      root /tmp/recording-studio;
+                      index index.html;
+                      try_files \$uri \$uri/ /index.html;
+                  }
+
+                  location /api/ {
+                      proxy_pass http://127.0.0.1:8081;
+
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host \$host;
+                      proxy_set_header X-Real-IP \$remote_addr;
+                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+                      proxy_read_timeout 3600;
+                      proxy_send_timeout 3600;
+                  }
+
+                  location /vnc/ {
+                      alias /usr/share/novnc/;
+                      index vnc.html;
+                  }
+
+                  location /app/ {
+                      alias /usr/share/novnc/app/;
+                  }
+
+                  location /core/ {
+                      alias /usr/share/novnc/core/;
+                  }
+
+                  location /vendor/ {
+                      alias /usr/share/novnc/vendor/;
+                  }
+
+                  location /websockify {
+
+                      proxy_pass http://127.0.0.1:6080;
+
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Upgrade \$http_upgrade;
+                      proxy_set_header Connection \$connection_upgrade;
+
+                      proxy_set_header Host \$host;
+
+                      proxy_read_timeout 3600;
+                      proxy_send_timeout 3600;
+                  }
+              }
+          }
           EOF
 
-          {
-            echo "# 🖥️ Remote SaaS Demo Computer"
-            echo
-            echo "## 🌐 Remote Desktop"
-            echo
-            echo "${REMOTE_URL}/vnc.html?autoconnect=true&resize=scale"
-            echo
-            echo "## 🔐 VNC Password"
-            echo
-            echo "\`${VNC_PASSWORD}\`"
-            echo
-            echo "## 🌐 SaaS Website"
-            echo
-            echo "${SITE_URL}"
-            echo
-            echo "## 🖥️ Display"
-            echo
-            echo "${WIDTH} × ${HEIGHT}"
-            echo
-            echo "## 🎥 Recording"
-            echo
-            echo "${FPS} FPS"
-            echo
-            echo "Recording will start automatically."
-            echo
-            echo "Use the Remote Desktop link to control the virtual computer."
-          } >> "$GITHUB_STEP_SUMMARY"
+          # ========================================================
+          # START CONTROLLER
+          # ========================================================
+          echo ""
+          echo "Starting recording controller..."
 
-      - name: Wait For Remote Connection
-        shell: bash
-        run: |
-          set -e
+          python3 "$CONTROLLER" \
+            > /tmp/recording-studio/controller.log 2>&1 &
 
-          echo
-          echo "=============================================="
-          echo "REMOTE COMPUTER IS READY"
-          echo "=============================================="
-          echo
-          echo "Use the URL from the previous step."
-          echo
-          echo "Starting recording in 20 seconds..."
-          echo
+          CONTROLLER_PID=$!
 
-          for i in $(seq 20 -1 1); do
-            echo "Starting recording in ${i}s..."
-            sleep 1
+          sleep 2
+
+          # ========================================================
+          # START NGINX
+          # ========================================================
+          echo ""
+          echo "Starting nginx..."
+
+          sudo nginx \
+            -c "$NGINX_CONF" \
+            -p /tmp/recording-studio \
+            > /tmp/recording-studio/nginx.log 2>&1
+
+          sleep 2
+
+          # ========================================================
+          # START CLOUDFLARED
+          # ========================================================
+          echo ""
+          echo "Starting Cloudflare Quick Tunnel..."
+
+          cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:8080 \
+            > "$CLOUDFLARED_LOG" 2>&1 &
+
+          CLOUDFLARED_PID=$!
+
+          # ========================================================
+          # WAIT FOR CLOUDFLARE URL
+          # ========================================================
+          echo ""
+          echo "Waiting for Cloudflare tunnel..."
+
+          PUBLIC_URL=""
+
+          for i in $(seq 1 60); do
+
+            if grep -Eo \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              "$CLOUDFLARED_LOG" \
+              >/tmp/recording-studio/url.txt 2>/dev/null; then
+
+              PUBLIC_URL="$(head -n 1 /tmp/recording-studio/url.txt)"
+
+              if [ -n "$PUBLIC_URL" ]; then
+                break
+              fi
+            fi
+
+            sleep 2
           done
 
-      - name: Start Recording
-        shell: bash
-        run: |
-          set -e
-
-          rm -f recording.mp4
-
-          echo
-          echo "=============================================="
-          echo "🎥 STARTING RECORDING"
-          echo "=============================================="
-
-          nohup ffmpeg \
-            -hide_banner \
-            -loglevel warning \
-            -f x11grab \
-            -draw_mouse 1 \
-            -framerate "${FPS}" \
-            -video_size "${WIDTH}x${HEIGHT}" \
-            -i "${DISPLAY}.0" \
-            -an \
-            -c:v libx264 \
-            -preset faster \
-            -crf 16 \
-            -tune animation \
-            -pix_fmt yuv420p \
-            -movflags +faststart \
-            recording.mp4 \
-            > /tmp/ffmpeg.log 2>&1 < /dev/null &
-
-          FFMPEG_PID=$!
-
-          echo "${FFMPEG_PID}" > /tmp/ffmpeg.pid
-
-          sleep 4
-
-          if ! kill -0 "${FFMPEG_PID}" 2>/dev/null; then
-            echo "FFmpeg failed to start."
-
-            echo
-            echo "FFmpeg log:"
-            cat /tmp/ffmpeg.log || true
-
+          if [ -z "$PUBLIC_URL" ]; then
+            echo "ERROR: Cloudflare tunnel URL was not found."
+            cat "$CLOUDFLARED_LOG" || true
             exit 1
           fi
 
-          echo
-          echo "Recording started successfully."
-          echo
-          echo "Control the virtual computer now."
-          echo
+          # ========================================================
+          # GITHUB SUMMARY
+          # ========================================================
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
 
-          echo "ffmpeg PID: ${FFMPEG_PID}"
+          # 🎬 Recording Studio
 
-      - name: Keep Computer And Recording Online
-        shell: bash
-        run: |
-          set -e
+          ## 🌐 Remote Control
 
-          MINUTES="${SESSION_MINUTES}"
+          **Open this URL in your browser:**
 
-          if ! [[ "${MINUTES}" =~ ^[0-9]+$ ]]; then
-            echo "Invalid session_minutes: ${MINUTES}"
-            exit 1
-          fi
+          ${PUBLIC_URL}
 
-          TOTAL_SECONDS=$((MINUTES * 60))
+          ## 🎥 Recording Controls
 
-          echo
-          echo "=============================================="
-          echo "SESSION ACTIVE"
-          echo "=============================================="
-          echo
-          echo "Duration: ${MINUTES} minutes"
+          1. Open the URL above.
+          2. Use the embedded Remote Desktop to control Chromium.
+          3. Press **START RECORDING**.
+          4. Perform your complete SaaS demonstration.
+          5. Press **STOP & SAVE**.
+          6. Wait for the MP4 to be finalized.
+          7. The finished MP4 will be uploaded as a GitHub Artifact.
+
+          ## 🖥️ Display
+
+          | Setting | Value |
+          |---|---|
+          | Resolution | ${WIDTH} × ${HEIGHT} |
+          | FPS | ${FPS} |
+          | Browser Scale | 1.25 |
+          | X11 DPI | 120 |
+          | Video | H.264 |
+          | CRF | 15 |
+          | Capture | Direct X11 |
+          | Remote Control | noVNC |
+          | Tunnel | Cloudflare Quick Tunnel |
+
+          ## 🔐 VNC Password
+
+          \`${VNC_PASSWORD}\`
+
+          ## 🔑 API Session Token
+
+          \`${SESSION_TOKEN}\`
+
+          EOF
+
+          echo ""
+          echo "============================================================"
+          echo "             RECORDING STUDIO IS READY"
+          echo "============================================================"
+          echo ""
+          echo "PUBLIC URL:"
+          echo "$PUBLIC_URL"
+          echo ""
+          echo "VNC PASSWORD:"
+          echo "$VNC_PASSWORD"
+          echo ""
+          echo "SESSION TOKEN:"
+          echo "$SESSION_TOKEN"
+          echo ""
           echo "Resolution: ${WIDTH}x${HEIGHT}"
-          echo "FPS: ${FPS}"
-          echo
+          echo "FPS:        ${FPS}"
+          echo "Scale:      1.25"
+          echo "DPI:        120"
+          echo ""
+          echo "============================================================"
+          echo ""
+          echo "Open the URL and control the virtual computer."
+          echo "Press START RECORDING when ready."
+          echo "Press STOP & SAVE when finished."
+          echo ""
 
-          for ((i=1; i<=TOTAL_SECONDS; i++)); do
-            sleep 1
+          # ========================================================
+          # CLEANUP FUNCTION
+          # ========================================================
+          cleanup() {
 
-            if (( i % 30 == 0 )); then
-              REMAINING=$((TOTAL_SECONDS - i))
+            echo ""
+            echo "Cleaning up recording environment..."
 
-              echo "Remaining: ${REMAINING} seconds"
-
-              if [ -f /tmp/ffmpeg.pid ]; then
-                FFMPEG_PID="$(cat /tmp/ffmpeg.pid)"
-
-                if ! kill -0 "${FFMPEG_PID}" 2>/dev/null; then
-                  echo
-                  echo "ERROR: FFmpeg stopped unexpectedly."
-                  echo
-
-                  cat /tmp/ffmpeg.log || true
-
-                  exit 1
-                fi
-              fi
+            if [ -n "${CONTROLLER_PID:-}" ]; then
+              kill "$CONTROLLER_PID" 2>/dev/null || true
             fi
+
+            if [ -n "${CLOUDFLARED_PID:-}" ]; then
+              kill "$CLOUDFLARED_PID" 2>/dev/null || true
+            fi
+
+            sudo nginx \
+              -c "$NGINX_CONF" \
+              -p /tmp/recording-studio \
+              -s stop \
+              2>/dev/null || true
+
+            if [ -n "${WEBSOCKIFY_PID:-}" ]; then
+              kill "$WEBSOCKIFY_PID" 2>/dev/null || true
+            fi
+
+            if [ -n "${X11VNC_PID:-}" ]; then
+              kill "$X11VNC_PID" 2>/dev/null || true
+            fi
+
+            if [ -n "${CHROME_PID:-}" ]; then
+              kill "$CHROME_PID" 2>/dev/null || true
+            fi
+
+            if [ -n "${XVFB_PID:-}" ]; then
+              kill "$XVFB_PID" 2>/dev/null || true
+            fi
+
+            echo "Cleanup complete."
+          }
+
+          trap cleanup EXIT
+
+          # ========================================================
+          # WAIT UNTIL STOP & SAVE
+          # ========================================================
+          while kill -0 "$CONTROLLER_PID" 2>/dev/null; do
+            sleep 2
           done
 
-          echo
-          echo "Session time completed."
+          echo ""
+          echo "Recording controller finished."
 
-      - name: Stop Recording Cleanly
-        if: always()
-        shell: bash
-        run: |
-          set +e
+          if [ -f "$STATE_FILE" ]; then
+            echo ""
+            echo "Final state:"
+            cat "$STATE_FILE"
+          fi
 
-          echo
-          echo "=============================================="
-          echo "STOPPING RECORDING"
-          echo "=============================================="
+          if [ -f "$RECORDING_FILE" ]; then
 
-          if [ -f /tmp/ffmpeg.pid ]; then
-            FFMPEG_PID="$(cat /tmp/ffmpeg.pid)"
+            echo ""
+            echo "Final video found:"
+            ls -lh "$RECORDING_FILE"
 
-            if kill -0 "${FFMPEG_PID}" 2>/dev/null; then
-              echo "Sending SIGINT to FFmpeg..."
+            echo ""
+            echo "Video information:"
 
-              kill -INT "${FFMPEG_PID}" 2>/dev/null || true
+            ffprobe \
+              -v error \
+              -show_entries \
+              format=duration,size \
+              -show_entries \
+              stream=codec_name,width,height,r_frame_rate \
+              -of default=noprint_wrappers=1 \
+              "$RECORDING_FILE" || true
 
-              for i in $(seq 1 30); do
-                if ! kill -0 "${FFMPEG_PID}" 2>/dev/null; then
-                  echo "FFmpeg stopped cleanly."
-                  break
-                fi
-
-                sleep 1
-              done
-
-              if kill -0 "${FFMPEG_PID}" 2>/dev/null; then
-                echo "FFmpeg did not stop after SIGINT."
-                echo "Sending SIGTERM..."
-
-                kill -TERM "${FFMPEG_PID}" 2>/dev/null || true
-
-                sleep 3
-              fi
-            else
-              echo "FFmpeg process is already stopped."
-            fi
           else
-            echo "FFmpeg PID file not found."
+
+            echo ""
+            echo "WARNING: No recording file was created."
+
           fi
 
-          echo
-          echo "FFmpeg log:"
-          tail -n 100 /tmp/ffmpeg.log 2>/dev/null || true
-
-          echo
-          echo "Checking output file..."
-
-          if [ ! -f recording.mp4 ]; then
-            echo "ERROR: recording.mp4 was not created."
-            exit 1
-          fi
-
-          FILE_SIZE="$(stat -c%s recording.mp4 2>/dev/null || echo 0)"
-
-          echo "File size: ${FILE_SIZE} bytes"
-
-          if [ "${FILE_SIZE}" -lt 100000 ]; then
-            echo "ERROR: recording file is suspiciously small."
-            ls -lh recording.mp4 || true
-            exit 1
-          fi
-
-          echo
-          echo "=============================================="
-          echo "VIDEO INFORMATION"
-          echo "=============================================="
-
-          ffprobe \
-            -v error \
-            -select_streams v:0 \
-            -show_entries \
-              stream=codec_name,width,height,r_frame_rate,pix_fmt,duration,bit_rate \
-            -of default=noprint_wrappers=1 \
-            recording.mp4 || true
-
-          echo
-          echo "Final file:"
-          ls -lh recording.mp4
-
-          echo
-          echo "Recording finalized."
-
-      - name: Upload Recording
+      # ============================================================
+      # 3. UPLOAD FINAL MP4
+      # ============================================================
+      - name: Upload recording
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: saas-demo-recording
-          path: recording.mp4
-          if-no-files-found: ignore
+          name: SaaS-Demo-Recording
+          path: /tmp/recordings/saas-demo.mp4
+          if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload Logs
+      # ============================================================
+      # 4. UPLOAD DEBUG LOGS
+      # ============================================================
+      - name: Upload debug logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: saas-demo-logs
+          name: Recording-Studio-Logs
           path: |
-            /tmp/xvfb.log
-            /tmp/chromium.log
-            /tmp/x11vnc.log
-            /tmp/novnc.log
-            /tmp/cloudflared.log
-            /tmp/ffmpeg.log
-            /tmp/font-cache.log
-            /tmp/remote-info.txt
+            /tmp/recording-studio/*.log
+            /tmp/recording-studio/state.json
+            /tmp/recording-studio/*.txt
           if-no-files-found: ignore
           retention-days: 3
-
-      - name: Cleanup
-        if: always()
-        shell: bash
-        run: |
-          set +e
-
-          echo "Cleaning up processes..."
-
-          if [ -f /tmp/ffmpeg.pid ]; then
-            kill -INT "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || true
-          fi
-
-          if [ -f /tmp/cloudflared.pid ]; then
-            kill "$(cat /tmp/cloudflared.pid)" 2>/dev/null || true
-          fi
-
-          if [ -f /tmp/novnc.pid ]; then
-            kill "$(cat /tmp/novnc.pid)" 2>/dev/null || true
-          fi
-
-          if [ -f /tmp/x11vnc.pid ]; then
-            kill "$(cat /tmp/x11vnc.pid)" 2>/dev/null || true
-          fi
-
-          if [ -f /tmp/chromium.pid ]; then
-            kill "$(cat /tmp/chromium.pid)" 2>/dev/null || true
-          fi
-
-          if [ -f /tmp/xvfb.pid ]; then
-            kill "$(cat /tmp/xvfb.pid)" 2>/dev/null || true
-          fi
-
-          pkill -f cloudflared 2>/dev/null || true
-          pkill -f websockify 2>/dev/null || true
-          pkill -f x11vnc 2>/dev/null || true
-          pkill -f chromium 2>/dev/null || true
-          pkill -f Xvfb 2>/dev/null || true
-
-          echo "Cleanup complete."
