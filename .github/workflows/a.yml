@@ -4,34 +4,33 @@ on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: "URL of the SaaS application to record"
+        description: "رابط موقع SaaS الذي سيتم فتحه"
         required: true
-        type: string
         default: "https://example.com"
-
+      session_minutes:
+        description: "أقصى مدة للجلسة كحماية فقط - ليست مدة التسجيل"
+        required: true
+        default: "120"
       width:
-        description: "Virtual screen width"
+        description: "عرض شاشة التسجيل"
         required: true
-        type: string
         default: "2560"
-
       height:
-        description: "Virtual screen height"
+        description: "ارتفاع شاشة التسجيل"
         required: true
-        type: string
         default: "1440"
-
       fps:
-        description: "Recording FPS"
+        description: "معدل الإطارات"
         required: true
-        type: string
         default: "60"
+
+permissions:
+  contents: read
 
 jobs:
   recorder:
-    name: Professional Recording Studio
     runs-on: ubuntu-24.04
-    timeout-minutes: 355
+    timeout-minutes: 350
 
     env:
       DISPLAY: ":99"
@@ -39,261 +38,360 @@ jobs:
       HEIGHT: ${{ inputs.height }}
       FPS: ${{ inputs.fps }}
       SITE_URL: ${{ inputs.site_url }}
+      SESSION_MINUTES: ${{ inputs.session_minutes }}
+      XCURSOR_SIZE: "64"
+      RECORDING_FILE: "${{ github.workspace }}/recording.mp4"
+      DIAGNOSTIC_SCREENSHOT: "${{ github.workspace }}/diagnostic-before-recording.png"
 
     steps:
-
-      # ============================================================
-      # 1. INSTALL EVERYTHING
-      # ============================================================
-      - name: Install dependencies
+      - name: Install Recording Stack
         shell: bash
         run: |
-          set -e
-
-          echo "=========================================="
-          echo " Installing recording environment"
-          echo "=========================================="
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
 
           sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          sudo apt-get install -y \
             xvfb \
             x11vnc \
+            novnc \
             websockify \
             nginx \
-            ffmpeg \
-            curl \
-            wget \
-            openssl \
-            ca-certificates \
             xdotool \
             x11-utils \
             x11-xserver-utils \
-            fonts-noto \
+            xcursor-themes \
+            adwaita-icon-theme \
+            fontconfig \
             fonts-noto-core \
             fonts-noto-ui-core \
-            fonts-noto-cjk \
             fonts-noto-color-emoji \
-            fonts-liberation \
-            fonts-dejavu \
-            jq \
-            unzip \
+            fonts-kacst \
+            ffmpeg \
+            chromium \
             python3 \
-            python3-pip
+            python3-websocket \
+            curl \
+            wget \
+            openssl \
+            ca-certificates
 
-          echo ""
-          echo "Installing Chromium..."
+          echo "Installed versions:"
+          chromium --version
+          ffmpeg -version | head -n 1
+          x11vnc -version 2>&1 | head -n 1 || true
+          websockify --version 2>&1 || true
+          nginx -v
 
-          sudo apt-get install -y chromium || true
+          test -f /usr/share/novnc/vnc.html
 
-          if command -v chromium >/dev/null 2>&1; then
-            echo "Chromium found: $(command -v chromium)"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "Chromium found: $(command -v chromium-browser)"
-          else
-            echo "Chromium was not found."
-            exit 1
-          fi
-
-          echo ""
-          echo "Installing Cloudflared..."
-
-          wget -q \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
-            -O /tmp/cloudflared.deb
-
-          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
-
-          cloudflared --version
-
-          echo ""
-          echo "=========================================="
-          echo " Dependencies installed"
-          echo "=========================================="
-
-      # ============================================================
-      # 2. CREATE RECORDING SYSTEM
-      # ============================================================
-      - name: Start Recording Studio
+      - name: Install Common Tajawal Fallback Fonts
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
 
-          mkdir -p /tmp/recording-studio
-          mkdir -p /tmp/recordings
-          mkdir -p /tmp/chromium-profile
+          FONT_DIR=/usr/local/share/fonts/tajawal
+          sudo mkdir -p "$FONT_DIR"
 
-          STATE_FILE="/tmp/recording-studio/state.json"
-          CONTROLLER="/tmp/recording-studio/controller.py"
-          DASHBOARD="/tmp/recording-studio/index.html"
-          NGINX_CONF="/tmp/recording-studio/nginx.conf"
-          VNC_PASSWORD_FILE="/tmp/recording-studio/vnc.pass"
-          CLOUDFLARED_LOG="/tmp/recording-studio/cloudflared.log"
+          BASE="https://raw.githubusercontent.com/google/fonts/main/ofl/tajawal"
 
-          RECORDING_FILE="/tmp/recordings/saas-demo.mp4"
+          for FONT in \
+            Tajawal-ExtraLight.ttf \
+            Tajawal-Light.ttf \
+            Tajawal-Regular.ttf \
+            Tajawal-Medium.ttf \
+            Tajawal-Bold.ttf \
+            Tajawal-ExtraBold.ttf \
+            Tajawal-Black.ttf; do
+            sudo wget -q "${BASE}/${FONT}" -O "${FONT_DIR}/${FONT}"
+          done
 
-          SESSION_TOKEN="$(openssl rand -hex 24)"
-          VNC_PASSWORD="$(openssl rand -hex 4)"
+          sudo fc-cache -f
 
-          echo "$VNC_PASSWORD" > "$VNC_PASSWORD_FILE"
-          chmod 600 "$VNC_PASSWORD_FILE"
+          echo "Tajawal system fallback fonts:"
+          fc-list | grep -i "Tajawal" | head -n 20 || true
 
-          export SESSION_TOKEN
-          export VNC_PASSWORD
-          export STATE_FILE
-          export RECORDING_FILE
+      - name: Prepare Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # ========================================================
-          # INITIAL STATE
-          # ========================================================
-          cat > "$STATE_FILE" <<EOF
-          {
-            "status": "booting",
-            "recording": false,
-            "finalized": false,
-            "file": null,
-            "duration": 0,
-            "size": 0,
-            "width": ${WIDTH},
-            "height": ${HEIGHT},
-            "fps": ${FPS}
-          }
-          EOF
+          rm -rf /tmp/saas-recorder /tmp/chromium-profile
+          mkdir -p /tmp/saas-recorder /tmp/chromium-profile
+          rm -f "$RECORDING_FILE" "$DIAGNOSTIC_SCREENSHOT"
 
-          # ========================================================
-          # X11 RESOURCE / DPI
-          # ========================================================
-          cat > /tmp/recording-studio/Xresources <<'EOF'
-          Xft.dpi: 120
-          Xft.antialias: true
-          Xft.hinting: true
-          Xft.hintstyle: hintslight
-          EOF
-
-          # ========================================================
-          # START VIRTUAL DISPLAY
-          # ========================================================
-          echo "Starting Xvfb..."
+      - name: Start Virtual Display
+        shell: bash
+        run: |
+          set -euo pipefail
 
           Xvfb "$DISPLAY" \
             -screen 0 "${WIDTH}x${HEIGHT}x24" \
-            -dpi 120 \
             -ac \
+            +extension GLX \
             +extension RANDR \
-            > /tmp/recording-studio/xvfb.log 2>&1 &
+            +render \
+            -noreset \
+            > /tmp/saas-recorder/xvfb.log 2>&1 &
 
-          XVFB_PID=$!
-
+          echo $! > /tmp/saas-recorder/xvfb.pid
           sleep 3
 
-          export XAUTHORITY="/tmp/recording-studio/.Xauthority"
+          DISPLAY="$DISPLAY" xrdb -merge <<'XRES'
+          Xcursor.theme: Adwaita
+          Xcursor.size: 64
+          XRES
 
-          touch "$XAUTHORITY"
+          DISPLAY="$DISPLAY" xdpyinfo | grep dimensions
+          DISPLAY="$DISPLAY" xrandr || true
 
-          xrdb -merge /tmp/recording-studio/Xresources || true
+      - name: Start Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          xsetroot -solid "#f5f5f5" || true
+          export DISPLAY="$DISPLAY"
+          export XCURSOR_SIZE="$XCURSOR_SIZE"
+          export XCURSOR_THEME="Adwaita"
 
-          xrandr \
-            --fb "${WIDTH}x${HEIGHT}" \
-            >/tmp/recording-studio/xrandr.log 2>&1 || true
-
-          echo ""
-          echo "Virtual display:"
-          xdpyinfo | grep dimensions || true
-
-          # ========================================================
-          # CHROMIUM
-          # ========================================================
-          echo ""
-          echo "Starting Chromium..."
-
-          if command -v chromium >/dev/null 2>&1; then
-            CHROME_BIN="$(command -v chromium)"
-          else
-            CHROME_BIN="$(command -v chromium-browser)"
-          fi
-
-          export XCURSOR_SIZE=48
-
-          "$CHROME_BIN" \
+          chromium \
             --no-sandbox \
             --disable-dev-shm-usage \
-            --disable-gpu-sandbox \
             --disable-session-crashed-bubble \
             --disable-infobars \
             --disable-translate \
-            --disable-popup-blocking \
-            --disable-notifications \
             --no-first-run \
             --no-default-browser-check \
             --disable-features=Translate,MediaRouter \
-            --disable-background-networking \
-            --disable-component-update \
-            --disable-sync \
-            --disable-default-apps \
-            --disable-extensions \
-            --force-device-scale-factor=1.25 \
-            --force-color-profile=srgb \
-            --high-dpi-support=1 \
-            --lang=ar-EG \
+            --ozone-platform=x11 \
+            --force-device-scale-factor=1 \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
             --kiosk \
             --start-fullscreen \
             --window-position=0,0 \
-            --window-size=2048,1152 \
+            --window-size="${WIDTH},${HEIGHT}" \
             --user-data-dir=/tmp/chromium-profile \
             "$SITE_URL" \
-            > /tmp/recording-studio/chromium.log 2>&1 &
+            > /tmp/saas-recorder/chromium.log 2>&1 &
 
-          CHROME_PID=$!
+          echo $! > /tmp/saas-recorder/chromium.pid
 
-          sleep 8
+          echo "Waiting for Chromium window..."
+          for i in $(seq 1 45); do
+            if DISPLAY="$DISPLAY" xdotool search --onlyvisible --class chromium >/dev/null 2>&1; then
+              echo "Chromium window detected."
+              break
+            fi
+            sleep 1
+          done
 
-          # ========================================================
-          # X11VNC
-          # ========================================================
-          echo ""
-          echo "Starting x11vnc..."
+          sleep 5
+          DISPLAY="$DISPLAY" xdotool mousemove 5 5
+
+      - name: Diagnose Fonts And Browser Rendering
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/saas-recorder/browser_diagnostics.py <<'PY'
+          import json
+          import time
+          import urllib.request
+          import websocket
+
+          def get_json(url):
+              with urllib.request.urlopen(url, timeout=5) as response:
+                  return json.loads(response.read().decode())
+
+          def cdp(ws_url, method, params=None, msg_id=1):
+              ws = websocket.create_connection(ws_url, timeout=15)
+              try:
+                  ws.send(json.dumps({
+                      "id": msg_id,
+                      "method": method,
+                      "params": params or {}
+                  }))
+                  while True:
+                      message = json.loads(ws.recv())
+                      if message.get("id") == msg_id:
+                          return message
+              finally:
+                  ws.close()
+
+          target = None
+          for _ in range(45):
+              try:
+                  targets = get_json("http://127.0.0.1:9222/json")
+                  pages = [x for x in targets if x.get("type") == "page"]
+                  if pages:
+                      target = pages[0]
+                      break
+              except Exception:
+                  pass
+              time.sleep(1)
+
+          if not target:
+              raise SystemExit("Could not find Chromium DevTools page.")
+
+          ws_url = target["webSocketDebuggerUrl"]
+
+          js = r'''
+          (async () => {
+            await document.fonts.ready;
+            const visible = el => {
+              const r = el.getBoundingClientRect();
+              const s = getComputedStyle(el);
+              return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+            };
+            const candidates = [...document.querySelectorAll('body *')]
+              .filter(el => visible(el) && ((el.textContent || '').trim().length > 0))
+              .slice(0, 80)
+              .map(el => {
+                const s = getComputedStyle(el);
+                return {
+                  tag: el.tagName.toLowerCase(),
+                  text: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100),
+                  fontFamily: s.fontFamily,
+                  fontSize: s.fontSize,
+                  fontWeight: s.fontWeight,
+                  lineHeight: s.lineHeight,
+                  letterSpacing: s.letterSpacing
+                };
+              });
+            return {
+              url: location.href,
+              readyState: document.readyState,
+              language: document.documentElement.lang,
+              direction: getComputedStyle(document.documentElement).direction,
+              documentFontsStatus: document.fonts.status,
+              documentFonts: [...document.fonts].map(f => ({
+                family: f.family,
+                style: f.style,
+                weight: f.weight,
+                stretch: f.stretch,
+                status: f.status,
+                display: f.display
+              })),
+              bodyFont: getComputedStyle(document.body).fontFamily,
+              bodyFontSize: getComputedStyle(document.body).fontSize,
+              bodyFontWeight: getComputedStyle(document.body).fontWeight,
+              candidates,
+              viewport: {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                devicePixelRatio: window.devicePixelRatio,
+                screenWidth: screen.width,
+                screenHeight: screen.height
+              }
+            };
+          })()
+          '''
+
+          result = cdp(
+              ws_url,
+              "Runtime.evaluate",
+              {
+                  "expression": js,
+                  "awaitPromise": True,
+                  "returnByValue": True
+              }
+          )
+
+          if "exceptionDetails" in result.get("result", {}):
+              print(json.dumps(result, indent=2))
+              raise SystemExit("Browser diagnostic JavaScript failed.")
+
+          value = result["result"]["result"].get("value", {})
+
+          with open("/tmp/saas-recorder/font-diagnostics.json", "w", encoding="utf-8") as f:
+              json.dump(value, f, ensure_ascii=False, indent=2)
+
+          print(json.dumps(value, ensure_ascii=False, indent=2))
+          PY
+
+          python3 /tmp/saas-recorder/browser_diagnostics.py
+
+          echo "Taking diagnostic frame..."
+          ffmpeg -hide_banner -loglevel warning \
+            -f x11grab \
+            -draw_mouse 1 \
+            -video_size "${WIDTH}x${HEIGHT}" \
+            -framerate 1 \
+            -i "${DISPLAY}.0" \
+            -frames:v 1 \
+            -y "$DIAGNOSTIC_SCREENSHOT"
+
+          echo "Diagnostic files created:"
+          ls -lh /tmp/saas-recorder/font-diagnostics.json "$DIAGNOSTIC_SCREENSHOT"
+
+          echo
+          echo "========== SYSTEM FONT MATCHES =========="
+          fc-match Tajawal || true
+          fc-match "Noto Sans Arabic" || true
+          echo
+          echo "========== BROWSER DIAGNOSTICS =========="
+          cat /tmp/saas-recorder/font-diagnostics.json
+
+      - name: Start VNC Server
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VNC_PASSWORD="$(openssl rand -hex 8)"
+          echo "$VNC_PASSWORD" > /tmp/saas-recorder/vnc-password.txt
+          chmod 600 /tmp/saas-recorder/vnc-password.txt
+
+          x11vnc -storepasswd \
+            "$VNC_PASSWORD" \
+            /tmp/saas-recorder/vnc-pass
+
+          chmod 600 /tmp/saas-recorder/vnc-pass
+          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
+
+          export DISPLAY="$DISPLAY"
+          export XCURSOR_SIZE="$XCURSOR_SIZE"
+          export XCURSOR_THEME="Adwaita"
 
           x11vnc \
             -display "$DISPLAY" \
-            -rfbauth "$VNC_PASSWORD_FILE" \
             -rfbport 5900 \
+            -rfbauth /tmp/saas-recorder/vnc-pass \
             -localhost \
             -forever \
             -shared \
             -noxdamage \
-            -noxfixes \
             -repeat \
             -noshm \
             -wait 5 \
             -defer 5 \
-            -cursor arrow \
-            > /tmp/recording-studio/x11vnc.log 2>&1 &
+            > /tmp/saas-recorder/x11vnc.log 2>&1 &
 
-          X11VNC_PID=$!
+          echo $! > /tmp/saas-recorder/x11vnc.pid
+          sleep 5
+          kill -0 "$(cat /tmp/saas-recorder/x11vnc.pid)"
 
-          sleep 2
+      - name: Start noVNC
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # ========================================================
-          # WEBSOCKIFY
-          # ========================================================
-          echo ""
-          echo "Starting Websockify..."
-
-          websockify \
+          nohup websockify \
+            --web=/usr/share/novnc \
             6080 \
             127.0.0.1:5900 \
-            > /tmp/recording-studio/websockify.log 2>&1 &
+            > /tmp/saas-recorder/novnc.log 2>&1 < /dev/null &
 
-          WEBSOCKIFY_PID=$!
+          echo $! > /tmp/saas-recorder/novnc.pid
+          sleep 5
+          curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null
 
-          sleep 2
+      - name: Create Recording API
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # ========================================================
-          # CONTROLLER PYTHON
-          # ========================================================
-          cat > "$CONTROLLER" <<'PYTHON'
+          cat > /tmp/saas-recorder/server.py <<'PY'
           import json
           import os
           import signal
@@ -301,1583 +399,564 @@ jobs:
           import threading
           import time
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-          from urllib.parse import urlparse
 
-          STATE_FILE = os.environ["STATE_FILE"]
-          SESSION_TOKEN = os.environ["SESSION_TOKEN"]
-          RECORDING_FILE = os.environ["RECORDING_FILE"]
+          HOST = "127.0.0.1"
+          PORT = 8090
+          DISPLAY = os.environ["DISPLAY"]
+          WIDTH = int(os.environ["WIDTH"])
+          HEIGHT = int(os.environ["HEIGHT"])
+          FPS = int(os.environ["FPS"])
+          OUTPUT = os.environ["RECORDING_FILE"]
+          TOKEN = os.environ["RECORD_API_TOKEN"]
+          LOGFILE = "/tmp/saas-recorder/ffmpeg.log"
 
-          WIDTH = int(os.environ.get("WIDTH", "2560"))
-          HEIGHT = int(os.environ.get("HEIGHT", "1440"))
-          FPS = int(os.environ.get("FPS", "60"))
-
+          lock = threading.RLock()
           ffmpeg_process = None
-          recording_started_at = None
-          state_lock = threading.Lock()
-          shutdown_event = threading.Event()
+          started_at = None
+          status = "idle"
+          error_message = None
+          final_info = None
 
-
-          def load_state():
-              try:
-                  with open(STATE_FILE, "r", encoding="utf-8") as f:
-                      return json.load(f)
-              except Exception:
-                  return {
-                      "status": "booting",
-                      "recording": False,
-                      "finalized": False
-                  }
-
-
-          def save_state(state):
-              temp = STATE_FILE + ".tmp"
-
-              with open(temp, "w", encoding="utf-8") as f:
-                  json.dump(state, f, ensure_ascii=False, indent=2)
-
-              os.replace(temp, STATE_FILE)
-
-
-          def get_token(handler):
-              auth = handler.headers.get("Authorization", "")
-
-              if auth.startswith("Bearer "):
-                  return auth[7:].strip()
-
-              return handler.headers.get("X-Recording-Token", "")
-
-
-          def authorized(handler):
-              return get_token(handler) == SESSION_TOKEN
-
-
-          def send_json(handler, payload, status=200):
-              raw = json.dumps(
-                  payload,
-                  ensure_ascii=False
-              ).encode("utf-8")
-
-              handler.send_response(status)
-              handler.send_header(
-                  "Content-Type",
-                  "application/json; charset=utf-8"
-              )
-              handler.send_header(
-                  "Content-Length",
-                  str(len(raw))
-              )
-              handler.send_header(
-                  "Cache-Control",
-                  "no-store"
-              )
+          def make_json(handler, code, payload):
+              raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              handler.send_response(code)
+              handler.send_header("Content-Type", "application/json; charset=utf-8")
+              handler.send_header("Cache-Control", "no-store")
+              handler.send_header("Content-Length", str(len(raw)))
               handler.end_headers()
-
               handler.wfile.write(raw)
 
+          def authorized(handler):
+              return handler.headers.get("Authorization", "") == f"Bearer {TOKEN}"
 
-          def ffprobe_video():
-              if not os.path.exists(RECORDING_FILE):
-                  return {
-                      "valid": False,
-                      "error": "Recording file does not exist."
-                  }
+          def probe_file():
+              if not os.path.exists(OUTPUT):
+                  return None
+              size = os.path.getsize(OUTPUT)
+              if size < 100_000:
+                  return None
+
+              command = [
+                  "ffprobe", "-v", "error", "-select_streams", "v:0",
+                  "-show_entries", "stream=codec_name,profile,level,width,height,avg_frame_rate,pix_fmt,duration",
+                  "-of", "json", OUTPUT
+              ]
+              result = subprocess.run(command, capture_output=True, text=True)
+              if result.returncode != 0:
+                  return None
 
               try:
-                  command = [
-                      "ffprobe",
-                      "-v",
-                      "error",
-                      "-show_entries",
-                      "format=duration,size",
-                      "-show_entries",
-                      "stream=width,height,r_frame_rate,codec_name",
-                      "-of",
-                      "json",
-                      RECORDING_FILE
-                  ]
-
-                  result = subprocess.run(
-                      command,
-                      capture_output=True,
-                      text=True,
-                      timeout=30
-                  )
-
-                  if result.returncode != 0:
-                      return {
-                          "valid": False,
-                          "error": result.stderr[-1000:]
-                      }
-
-                  data = json.loads(result.stdout)
-
-                  duration = 0
-
-                  if "format" in data:
-                      duration = float(
-                          data["format"].get("duration") or 0
-                      )
-
-                  size = os.path.getsize(RECORDING_FILE)
-
-                  stream = {}
-
-                  if data.get("streams"):
-                      stream = data["streams"][0]
-
+                  payload = json.loads(result.stdout)
+                  stream = payload.get("streams", [None])[0]
+                  if not stream:
+                      return None
+                  rate = stream.get("avg_frame_rate", "0/1")
+                  n, d = rate.split("/", 1)
+                  fps_value = round(float(n) / float(d), 3) if float(d) else 0
                   return {
-                      "valid": duration > 0 and size > 10000,
-                      "duration": duration,
-                      "size": size,
+                      "file": OUTPUT,
+                      "size_bytes": size,
+                      "size_mb": round(size / 1024 / 1024, 2),
+                      "codec": stream.get("codec_name"),
+                      "profile": stream.get("profile"),
+                      "level": stream.get("level"),
                       "width": stream.get("width"),
                       "height": stream.get("height"),
-                      "fps": stream.get("r_frame_rate"),
-                      "codec": stream.get("codec_name")
+                      "fps": fps_value,
+                      "pixel_format": stream.get("pix_fmt"),
+                      "duration": round(float(stream.get("duration") or 0), 3)
                   }
+              except Exception:
+                  return None
 
-              except Exception as e:
+          def snapshot():
+              with lock:
+                  live_duration = 0
+                  if started_at is not None:
+                      live_duration = max(0, round(time.time() - started_at, 3))
                   return {
-                      "valid": False,
-                      "error": str(e)
+                      "success": status != "failed",
+                      "status": status,
+                      "recording": status == "recording",
+                      "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_at)) if started_at else None,
+                      "duration_live": live_duration,
+                      "file_ready": status == "completed" and final_info is not None,
+                      "file": final_info,
+                      "error": error_message
                   }
-
 
           def start_recording():
-              global ffmpeg_process
-              global recording_started_at
+              global ffmpeg_process, started_at, status, error_message, final_info
+              with lock:
+                  if status == "recording":
+                      return 409, snapshot()
+                  if status == "finalizing":
+                      return 409, snapshot()
 
-              with state_lock:
-                  if ffmpeg_process is not None:
-                      if ffmpeg_process.poll() is None:
-                          return {
-                              "ok": False,
-                              "error": "Recording is already running."
-                          }
+                  if os.path.exists(OUTPUT):
+                      os.remove(OUTPUT)
 
-                  if os.path.exists(RECORDING_FILE):
-                      os.remove(RECORDING_FILE)
+                  final_info = None
+                  error_message = None
+                  log = open(LOGFILE, "w", buffering=1)
 
                   command = [
-                      "ffmpeg",
-                      "-hide_banner",
-                      "-loglevel",
-                      "warning",
-
-                      "-f",
-                      "x11grab",
-
-                      "-draw_mouse",
-                      "1",
-
-                      "-framerate",
-                      str(FPS),
-
-                      "-video_size",
-                      f"{WIDTH}x{HEIGHT}",
-
-                      "-i",
-                      ":99.0",
-
+                      "ffmpeg", "-hide_banner", "-loglevel", "warning",
+                      "-f", "x11grab",
+                      "-draw_mouse", "1",
+                      "-framerate", str(FPS),
+                      "-video_size", f"{WIDTH}x{HEIGHT}",
+                      "-i", f"{DISPLAY}.0",
                       "-an",
-
-                      "-c:v",
-                      "libx264",
-
-                      "-preset",
-                      "faster",
-
-                      "-crf",
-                      "15",
-
-                      "-tune",
-                      "animation",
-
-                      "-pix_fmt",
-                      "yuv420p",
-
-                      "-profile:v",
-                      "high",
-
-                      "-level",
-                      "5.1",
-
-                      "-movflags",
-                      "+faststart",
-
-                      "-y",
-                      RECORDING_FILE
+                      "-c:v", "libx264",
+                      "-preset", "veryfast",
+                      "-crf", "14",
+                      "-profile:v", "high",
+                      "-level:v", "5.1",
+                      "-tune", "animation",
+                      "-pix_fmt", "yuv420p",
+                      "-movflags", "+faststart",
+                      "-y", OUTPUT
                   ]
 
                   ffmpeg_process = subprocess.Popen(
                       command,
-                      stdout=subprocess.DEVNULL,
-                      stderr=subprocess.PIPE,
-                      text=True
+                      stdout=log,
+                      stderr=subprocess.STDOUT
                   )
+                  started_at = time.time()
+                  status = "recording"
 
-                  recording_started_at = time.time()
-
-                  state = load_state()
-
-                  state.update({
-                      "status": "recording",
-                      "recording": True,
-                      "finalized": False,
-                      "file": None,
-                      "duration": 0,
-                      "size": 0,
-                      "started_at": recording_started_at
-                  })
-
-                  save_state(state)
-
-                  return {
-                      "ok": True,
-                      "status": "recording"
-                  }
-
+                  return 200, snapshot()
 
           def stop_recording():
-              global ffmpeg_process
-              global recording_started_at
+              global ffmpeg_process, status, error_message, final_info
+              with lock:
+                  if status != "recording" or ffmpeg_process is None:
+                      return 409, snapshot()
+                  process = ffmpeg_process
+                  status = "finalizing"
 
-              with state_lock:
-                  if ffmpeg_process is None:
-                      return {
-                          "ok": False,
-                          "error": "No recording process exists."
-                      }
-
-                  if ffmpeg_process.poll() is not None:
-                      result = ffprobe_video()
-
-                      state = load_state()
-
-                      state.update({
-                          "status": "finished",
-                          "recording": False,
-                          "finalized": result.get("valid", False),
-                          "file": RECORDING_FILE if result.get("valid") else None,
-                          "duration": result.get("duration", 0),
-                          "size": result.get("size", 0)
-                      })
-
-                      save_state(state)
-
-                      shutdown_event.set()
-
-                      return {
-                          "ok": result.get("valid", False),
-                          **result
-                      }
-
+              try:
+                  process.send_signal(signal.SIGINT)
+                  process.wait(timeout=45)
+              except subprocess.TimeoutExpired:
                   try:
-                      ffmpeg_process.send_signal(signal.SIGINT)
-
+                      process.terminate()
+                      process.wait(timeout=10)
+                  except subprocess.TimeoutExpired:
                       try:
-                          ffmpeg_process.wait(timeout=45)
-
-                      except subprocess.TimeoutExpired:
-                          ffmpeg_process.kill()
-                          ffmpeg_process.wait(timeout=10)
-
-                  except Exception:
-                      try:
-                          ffmpeg_process.kill()
+                          process.kill()
                       except Exception:
                           pass
+                      process.wait(timeout=5)
+              except Exception as exc:
+                  with lock:
+                      status = "failed"
+                      error_message = str(exc)
+                  return 500, snapshot()
 
-                  result = ffprobe_video()
+              info = probe_file()
 
-                  state = load_state()
+              with lock:
+                  ffmpeg_process = None
+                  if process.returncode not in (0, 255):
+                      status = "failed"
+                      error_message = f"FFmpeg exited with code {process.returncode}"
+                  elif not info:
+                      status = "failed"
+                      error_message = "MP4 was not finalized or ffprobe could not validate it."
+                  else:
+                      status = "completed"
+                      error_message = None
+                      final_info = info
 
-                  state.update({
-                      "status": "finished" if result.get("valid") else "error",
-                      "recording": False,
-                      "finalized": result.get("valid", False),
-                      "file": RECORDING_FILE if result.get("valid") else None,
-                      "duration": result.get("duration", 0),
-                      "size": result.get("size", 0)
-                  })
-
-                  save_state(state)
-
-                  shutdown_event.set()
-
-                  return {
-                      "ok": result.get("valid", False),
-                      **result
-                  }
-
+                  return (200 if status == "completed" else 500), snapshot()
 
           class Handler(BaseHTTPRequestHandler):
+              server_version = "SaaSRecorderAPI/2.0"
 
-              def log_message(self, format, *args):
-                  return
+              def log_message(self, fmt, *args):
+                  print(fmt % args, flush=True)
 
               def do_GET(self):
-                  parsed = urlparse(self.path)
-
-                  if parsed.path == "/api/record/status":
-
-                      if not authorized(self):
-                          send_json(
-                              self,
-                              {
-                                  "ok": False,
-                                  "error": "Unauthorized"
-                              },
-                              401
-                          )
-                          return
-
-                      state = load_state()
-
-                      if state.get("recording") and recording_started_at:
-                          state["elapsed"] = (
-                              time.time() - recording_started_at
-                          )
-                      else:
-                          state["elapsed"] = state.get("duration", 0)
-
-                      send_json(
-                          self,
-                          {
-                              "ok": True,
-                              **state
-                          }
-                      )
-
+                  if self.path == "/api/health":
+                      make_json(self, 200, {"ok": True})
                       return
 
-                  if parsed.path == "/api/health":
-                      send_json(
-                          self,
-                          {
-                              "ok": True,
-                              "service": "recording-studio"
-                          }
-                      )
+                  if not self.path.startswith("/api/") or not authorized(self):
+                      make_json(self, 401, {"success": False, "error": "Unauthorized"})
                       return
 
-                  send_json(
-                      self,
-                      {
-                          "ok": False,
-                          "error": "Not found"
-                      },
-                      404
-                  )
+                  if self.path in ("/api/status", "/api/record/status"):
+                      make_json(self, 200, snapshot())
+                      return
 
+                  make_json(self, 404, {"success": False, "error": "Not found"})
 
               def do_POST(self):
-                  parsed = urlparse(self.path)
-
-                  if not authorized(self):
-                      send_json(
-                          self,
-                          {
-                              "ok": False,
-                              "error": "Unauthorized"
-                          },
-                          401
-                      )
+                  if not self.path.startswith("/api/") or not authorized(self):
+                      make_json(self, 401, {"success": False, "error": "Unauthorized"})
                       return
 
-                  if parsed.path == "/api/record/start":
-                      result = start_recording()
-                      send_json(
-                          self,
-                          result,
-                          200 if result.get("ok") else 409
-                      )
+                  if self.path == "/api/record/start":
+                      code, payload = start_recording()
+                      make_json(self, code, payload)
                       return
 
-                  if parsed.path == "/api/record/stop":
-                      result = stop_recording()
-                      send_json(
-                          self,
-                          result,
-                          200 if result.get("ok") else 409
-                      )
+                  if self.path == "/api/record/stop":
+                      code, payload = stop_recording()
+                      make_json(self, code, payload)
                       return
 
-                  send_json(
-                      self,
-                      {
-                          "ok": False,
-                          "error": "Not found"
-                      },
-                      404
-                  )
+                  make_json(self, 404, {"success": False, "error": "Not found"})
 
+          server = ThreadingHTTPServer((HOST, PORT), Handler)
+          print(f"Recording API listening on http://{HOST}:{PORT}", flush=True)
+          server.serve_forever()
+          PY
 
-          server = ThreadingHTTPServer(
-              ("127.0.0.1", 8081),
-              Handler
-          )
+      - name: Create Control Panel
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          sudo mkdir -p /opt/saas-recorder
 
-          state = load_state()
-
-          state.update({
-              "status": "ready",
-              "recording": False,
-              "finalized": False
-          })
-
-          save_state(state)
-
-          def shutdown():
-              try:
-                  server.shutdown()
-              except Exception:
-                  pass
-
-
-          threading.Thread(
-              target=shutdown_event.wait,
-              daemon=True
-          ).start()
-
-
-          def shutdown_watcher():
-              shutdown_event.wait()
-
-              try:
-                  server.shutdown()
-              except Exception:
-                  pass
-
-
-          threading.Thread(
-              target=shutdown_watcher,
-              daemon=True
-          ).start()
-
-
-          print("Recording controller started on 127.0.0.1:8081")
-
-          try:
-              server.serve_forever()
-
-          except KeyboardInterrupt:
-              pass
-
-          finally:
-              server.server_close()
-          PYTHON
-
-          # ========================================================
-          # PROFESSIONAL DASHBOARD
-          # ========================================================
-          cat > "$DASHBOARD" <<'HTML'
-          <!DOCTYPE html>
+          sudo tee /opt/saas-recorder/control.html >/dev/null <<'HTML'
+          <!doctype html>
           <html lang="en">
           <head>
-            <meta charset="UTF-8">
-            <meta
-              name="viewport"
-              content="width=device-width,initial-scale=1,maximum-scale=1"
-            >
-
-            <title>Recording Studio</title>
-
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>SaaS Recording Control</title>
             <style>
-              * {
-                box-sizing: border-box;
-              }
-
-              html,
-              body {
-                margin: 0;
-                padding: 0;
-                width: 100%;
-                height: 100%;
-                background: #f5f5f5;
-                color: #171717;
-                font-family:
-                  Inter,
-                  "Noto Sans",
-                  "Noto Sans Arabic",
-                  Arial,
-                  sans-serif;
-              }
-
-              body {
-                overflow: hidden;
-              }
-
-              .app {
-                width: 100%;
-                height: 100%;
-                display: flex;
-                flex-direction: column;
-              }
-
-              .topbar {
-                height: 72px;
-                flex: 0 0 72px;
-                background: #ffffff;
-                border-bottom: 1px solid #e5e5e5;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 0 26px;
-              }
-
-              .brand {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-              }
-
-              .brand-mark {
-                width: 34px;
-                height: 34px;
-                border-radius: 10px;
-                background: #171717;
-                color: white;
-                display: grid;
-                place-items: center;
-                font-size: 15px;
-                font-weight: 800;
-              }
-
-              .brand-title {
-                font-size: 15px;
-                font-weight: 750;
-                letter-spacing: -0.02em;
-              }
-
-              .brand-subtitle {
-                font-size: 11px;
-                color: #737373;
-                margin-top: 2px;
-              }
-
-              .status {
-                display: flex;
-                align-items: center;
-                gap: 9px;
-                border: 1px solid #e5e5e5;
-                border-radius: 999px;
-                padding: 8px 13px;
-                background: #fafafa;
-                font-size: 12px;
-                font-weight: 650;
-              }
-
-              .dot {
-                width: 8px;
-                height: 8px;
-                border-radius: 50%;
-                background: #a3a3a3;
-              }
-
-              .dot.ready {
-                background: #22c55e;
-              }
-
-              .dot.recording {
-                background: #ef4444;
-                box-shadow: 0 0 0 4px rgba(239,68,68,.10);
-              }
-
-              .main {
-                flex: 1;
-                min-height: 0;
-                display: grid;
-                grid-template-columns: minmax(0, 1fr) 330px;
-                gap: 18px;
-                padding: 18px;
-              }
-
-              .screen-card {
-                min-width: 0;
-                min-height: 0;
-                background: #171717;
-                border-radius: 18px;
-                overflow: hidden;
-                border: 1px solid #262626;
-                display: flex;
-                flex-direction: column;
-              }
-
-              .screen-header {
-                height: 48px;
-                flex: 0 0 48px;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 0 15px;
-                color: #d4d4d4;
-                border-bottom: 1px solid #2a2a2a;
-                background: #1c1c1c;
-              }
-
-              .screen-label {
-                font-size: 12px;
-                font-weight: 650;
-              }
-
-              .screen-meta {
-                color: #737373;
-                font-size: 11px;
-              }
-
-              .screen {
-                flex: 1;
-                min-height: 0;
-                background: #000;
-                position: relative;
-              }
-
-              .screen iframe {
-                position: absolute;
-                inset: 0;
-                width: 100%;
-                height: 100%;
-                border: 0;
-                background: #000;
-              }
-
-              .sidebar {
-                min-height: 0;
-                background: #ffffff;
-                border: 1px solid #e5e5e5;
-                border-radius: 18px;
-                padding: 20px;
-                display: flex;
-                flex-direction: column;
-                overflow: auto;
-              }
-
-              .section-label {
-                font-size: 10px;
-                font-weight: 800;
-                letter-spacing: .10em;
-                text-transform: uppercase;
-                color: #737373;
-                margin-bottom: 10px;
-              }
-
-              .record-state {
-                border: 1px solid #e5e5e5;
-                border-radius: 14px;
-                padding: 16px;
-                background: #fafafa;
-                margin-bottom: 18px;
-              }
-
-              .record-state-title {
-                font-size: 12px;
-                color: #737373;
-                margin-bottom: 7px;
-              }
-
-              .record-state-value {
-                font-size: 25px;
-                line-height: 1;
-                font-weight: 800;
-                letter-spacing: -0.04em;
-              }
-
-              .timer {
-                margin-top: 10px;
-                font-family:
-                  "SFMono-Regular",
-                  Consolas,
-                  monospace;
-                font-size: 20px;
-                font-weight: 650;
-              }
-
-              .buttons {
-                display: grid;
-                gap: 10px;
-                margin-bottom: 22px;
-              }
-
-              button {
-                appearance: none;
-                border: 0;
-                cursor: pointer;
-                width: 100%;
-                height: 50px;
-                border-radius: 12px;
-                font-size: 13px;
-                font-weight: 750;
-                transition: .15s ease;
-              }
-
-              button:active {
-                transform: scale(.985);
-              }
-
-              button:disabled {
-                cursor: not-allowed;
-                opacity: .40;
-              }
-
-              .start {
-                background: #171717;
-                color: #ffffff;
-              }
-
-              .start:hover:not(:disabled) {
-                background: #303030;
-              }
-
-              .stop {
-                background: #fef2f2;
-                color: #b91c1c;
-                border: 1px solid #fecaca;
-              }
-
-              .stop:hover:not(:disabled) {
-                background: #fee2e2;
-              }
-
-              .info {
-                display: grid;
-                gap: 1px;
-                background: #e5e5e5;
-                border: 1px solid #e5e5e5;
-                border-radius: 14px;
-                overflow: hidden;
-              }
-
-              .info-row {
-                background: #ffffff;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 12px 13px;
-                font-size: 12px;
-              }
-
-              .info-key {
-                color: #737373;
-              }
-
-              .info-value {
-                font-weight: 700;
-                color: #262626;
-              }
-
-              .message {
-                margin-top: auto;
-                padding-top: 18px;
-                color: #737373;
-                font-size: 11px;
-                line-height: 1.55;
-              }
-
-              .ready-text {
-                color: #16a34a;
-              }
-
-              .recording-text {
-                color: #dc2626;
-              }
-
-              .finished-text {
-                color: #525252;
-              }
-
-              @media(max-width:900px) {
-                .main {
-                  grid-template-columns: 1fr;
-                }
-
-                .sidebar {
-                  display: none;
-                }
-
-                .screen-card {
-                  border-radius: 12px;
-                }
-              }
+              *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:#f5f5f5;color:#1c1917;font-family:Arial,sans-serif}header{height:66px;background:#fff;border-bottom:1px solid #ddd;padding:0 18px;display:flex;align-items:center;gap:12px}.title{font-weight:800;font-size:18px}.badge{border:1px solid #ddd;background:#fafafa;border-radius:999px;padding:6px 10px;font-size:12px}.main{height:calc(100% - 66px);display:grid;grid-template-columns:320px 1fr;gap:14px;padding:14px}.panel{background:#fff;border:1px solid #ddd;border-radius:14px;padding:14px;overflow:auto}.viewer{padding:0;background:#111;overflow:hidden}.viewer iframe{width:100%;height:100%;border:0;display:block}.stack{display:flex;flex-direction:column;gap:10px}label{font-size:12px;font-weight:800}input{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;background:#fff}button{border:0;border-radius:9px;padding:12px;font-weight:800;cursor:pointer}.start{background:#1c1917;color:#fff}.stop{background:#ddd;color:#1c1917}.neutral{background:#efefef;color:#1c1917}.status{border:1px solid #ddd;border-radius:9px;background:#fafafa;padding:11px;font:11px/1.45 monospace;white-space:pre-wrap;overflow-wrap:anywhere}.hint{font-size:11px;line-height:1.55;color:#666}.ok{color:#176b2c}.bad{color:#a00}.row{display:flex;gap:8px}.row button{flex:1}@media(max-width:900px){.main{grid-template-columns:1fr}.viewer{height:65vh}.panel{max-height:35vh}}
             </style>
           </head>
-
           <body>
-
-          <div class="app">
-
-            <header class="topbar">
-
-              <div class="brand">
-                <div class="brand-mark">R</div>
-
-                <div>
-                  <div class="brand-title">
-                    Recording Studio
-                  </div>
-
-                  <div class="brand-subtitle">
-                    SaaS product demonstration environment
-                  </div>
-                </div>
-              </div>
-
-              <div class="status">
-                <span id="dot" class="dot"></span>
-                <span id="connection">Connecting</span>
-              </div>
-
+            <header>
+              <div class="title">🎥 SaaS Recording Control</div>
+              <div id="badge" class="badge">IDLE</div>
+              <div class="badge">2560×1440 · 60 FPS · H.264</div>
             </header>
-
-            <main class="main">
-
-              <section class="screen-card">
-
-                <div class="screen-header">
-                  <span class="screen-label">
-                    Remote Desktop
-                  </span>
-
-                  <span class="screen-meta">
-                    ${WIDTH} × ${HEIGHT} · ${FPS} FPS
-                  </span>
+            <div class="main">
+              <section class="panel">
+                <div class="stack">
+                  <div><label>Recording API Token</label><input id="token" type="password" autocomplete="off" placeholder="Token from Actions Summary"></div>
+                  <div><label>VNC Password</label><input id="vncpass" type="password" autocomplete="off" placeholder="Password from Actions Summary"></div>
+                  <div class="row"><button class="neutral" onclick="openRemote()">Open Remote</button><button class="neutral" onclick="reloadRemote()">Reload</button></div>
+                  <button class="start" onclick="startRecording()">🔴 START RECORDING</button>
+                  <button class="stop" onclick="stopRecording()">⏹ STOP & SAVE VIDEO</button>
+                  <div id="status" class="status">Waiting...</div>
+                  <div class="hint"><b>Workflow:</b><br>1. Open the remote view.<br>2. Prepare the SaaS demo.<br>3. Press START exactly at the first frame you want.<br>4. Perform your mouse/keyboard actions.<br>5. Press STOP exactly at the last frame you want.<br>6. FFmpeg finalizes and validates the MP4.<br><br>The session timeout is only a safety limit. It does not define the video duration.</div>
                 </div>
-
-                <div class="screen">
-                  <iframe
-                    id="vnc"
-                    src="/vnc/vnc.html?autoconnect=true&resize=scale&path=websockify&password=${VNC_PASSWORD}"
-                    allow="fullscreen"
-                  ></iframe>
-                </div>
-
               </section>
-
-              <aside class="sidebar">
-
-                <div class="section-label">
-                  Recording
-                </div>
-
-                <div class="record-state">
-
-                  <div class="record-state-title">
-                    Current state
-                  </div>
-
-                  <div
-                    id="state"
-                    class="record-state-value"
-                  >
-                    READY
-                  </div>
-
-                  <div
-                    id="timer"
-                    class="timer"
-                  >
-                    00:00:00
-                  </div>
-
-                </div>
-
-                <div class="buttons">
-
-                  <button
-                    id="start"
-                    class="start"
-                    onclick="startRecording()"
-                  >
-                    START RECORDING
-                  </button>
-
-                  <button
-                    id="stop"
-                    class="stop"
-                    onclick="stopRecording()"
-                    disabled
-                  >
-                    STOP & SAVE
-                  </button>
-
-                </div>
-
-                <div class="section-label">
-                  Session
-                </div>
-
-                <div class="info">
-
-                  <div class="info-row">
-                    <span class="info-key">Resolution</span>
-                    <span class="info-value">
-                      ${WIDTH}×${HEIGHT}
-                    </span>
-                  </div>
-
-                  <div class="info-row">
-                    <span class="info-key">Frame rate</span>
-                    <span class="info-value">
-                      ${FPS} FPS
-                    </span>
-                  </div>
-
-                  <div class="info-row">
-                    <span class="info-key">Codec</span>
-                    <span class="info-value">
-                      H.264
-                    </span>
-                  </div>
-
-                  <div class="info-row">
-                    <span class="info-key">Quality</span>
-                    <span class="info-value">
-                      CRF 15
-                    </span>
-                  </div>
-
-                  <div class="info-row">
-                    <span class="info-key">Capture</span>
-                    <span class="info-value">
-                      X11 Direct
-                    </span>
-                  </div>
-
-                </div>
-
-                <div
-                  id="message"
-                  class="message"
-                >
-                  The remote desktop is ready.
-                  Press START RECORDING when you are ready
-                  to begin the demonstration.
-                </div>
-
-              </aside>
-
-            </main>
-
-          </div>
-
-          <script>
-            const TOKEN = "${SESSION_TOKEN}";
-
-            let startedAt = null;
-            let timerInterval = null;
-
-            const headers = {
-              "X-Recording-Token": TOKEN
-            };
-
-            function formatTime(seconds) {
-              seconds = Math.max(0, Math.floor(seconds));
-
-              const h = String(
-                Math.floor(seconds / 3600)
-              ).padStart(2, "0");
-
-              const m = String(
-                Math.floor((seconds % 3600) / 60)
-              ).padStart(2, "0");
-
-              const s = String(
-                seconds % 60
-              ).padStart(2, "0");
-
-              return `${h}:${m}:${s}`;
-            }
-
-            function setState(state) {
-              const stateEl =
-                document.getElementById("state");
-
-              const dot =
-                document.getElementById("dot");
-
-              const connection =
-                document.getElementById("connection");
-
-              const start =
-                document.getElementById("start");
-
-              const stop =
-                document.getElementById("stop");
-
-              const message =
-                document.getElementById("message");
-
-              stateEl.className =
-                "record-state-value";
-
-              dot.className = "dot";
-
-              if (state === "ready") {
-                stateEl.textContent = "READY";
-                dot.classList.add("ready");
-                connection.textContent = "Online";
-
-                start.disabled = false;
-                stop.disabled = true;
-
-                message.className = "message ready-text";
-                message.textContent =
-                  "The remote desktop is ready. " +
-                  "Press START RECORDING when you are ready.";
-              }
-
-              else if (state === "recording") {
-                stateEl.textContent = "RECORDING";
-                dot.classList.add("recording");
-                connection.textContent = "Recording";
-
-                start.disabled = true;
-                stop.disabled = false;
-
-                message.className =
-                  "message recording-text";
-
-                message.textContent =
-                  "Recording is active. " +
-                  "Perform your product demonstration, " +
-                  "then press STOP & SAVE.";
-              }
-
-              else if (state === "finished") {
-                stateEl.textContent = "SAVED";
-                dot.classList.add("ready");
-                connection.textContent = "Finished";
-
-                start.disabled = true;
-                stop.disabled = true;
-
-                message.className =
-                  "message finished-text";
-
-                message.textContent =
-                  "The recording has been finalized successfully. " +
-                  "GitHub Actions will upload the MP4 artifact.";
-              }
-
-              else {
-                stateEl.textContent =
-                  state.toUpperCase();
-
-                connection.textContent =
-                  "Online";
-              }
-            }
-
-            async function api(url, options = {}) {
-              options.headers = {
-                ...headers,
-                ...(options.headers || {})
-              };
-
-              const response =
-                await fetch(url, options);
-
-              return await response.json();
-            }
-
-            async function refreshStatus() {
-              try {
-                const data =
-                  await api("/api/record/status");
-
-                if (!data.ok) {
-                  throw new Error(data.error);
-                }
-
-                document.getElementById("connection")
-                  .textContent = "Online";
-
-                if (data.recording) {
-                  if (!startedAt) {
-                    startedAt =
-                      Date.now() -
-                      ((data.elapsed || 0) * 1000);
-                  }
-
-                  startTimer();
-                  setState("recording");
-                }
-
-                else if (data.finalized) {
-                  startedAt = null;
-                  stopTimer();
-
-                  document.getElementById("timer")
-                    .textContent =
-                    formatTime(data.duration || 0);
-
-                  setState("finished");
-                }
-
-                else {
-                  setState("ready");
-                }
-
-              } catch (error) {
-                document.getElementById("connection")
-                  .textContent = "Connection error";
-              }
-            }
-
-            function startTimer() {
-              if (timerInterval) return;
-
-              timerInterval =
-                setInterval(() => {
-
-                  if (!startedAt) return;
-
-                  const elapsed =
-                    (Date.now() - startedAt) / 1000;
-
-                  document.getElementById("timer")
-                    .textContent =
-                    formatTime(elapsed);
-
-                }, 250);
-            }
-
-            function stopTimer() {
-              if (timerInterval) {
-                clearInterval(timerInterval);
-                timerInterval = null;
-              }
-            }
-
-            async function startRecording() {
-              const button =
-                document.getElementById("start");
-
-              button.disabled = true;
-
-              try {
-                const data =
-                  await api(
-                    "/api/record/start",
-                    {
-                      method: "POST"
-                    }
-                  );
-
-                if (!data.ok) {
-                  alert(data.error || "Could not start recording.");
-                  button.disabled = false;
-                  return;
-                }
-
-                startedAt = Date.now();
-
-                document.getElementById("timer")
-                  .textContent = "00:00:00";
-
-                startTimer();
-                setState("recording");
-
-              } catch (error) {
-                alert(
-                  "Could not start recording."
-                );
-
-                button.disabled = false;
-              }
-            }
-
-            async function stopRecording() {
-              const button =
-                document.getElementById("stop");
-
-              button.disabled = true;
-
-              document.getElementById("state")
-                .textContent = "FINALIZING";
-
-              document.getElementById("message")
-                .textContent =
-                "Finishing the MP4 safely. Please wait...";
-
-              try {
-                const data =
-                  await api(
-                    "/api/record/stop",
-                    {
-                      method: "POST"
-                    }
-                  );
-
-                stopTimer();
-
-                if (!data.ok) {
-                  alert(
-                    data.error ||
-                    "The recording could not be finalized."
-                  );
-
-                  await refreshStatus();
-                  return;
-                }
-
-                document.getElementById("timer")
-                  .textContent =
-                  formatTime(data.duration || 0);
-
-                setState("finished");
-
-              } catch (error) {
-                alert(
-                  "Connection lost while finalizing the recording."
-                );
-              }
-            }
-
-            refreshStatus();
-
-            setInterval(
-              refreshStatus,
-              2000
-            );
-          </script>
-
+              <section class="panel viewer"><iframe id="remote" src="/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe></section>
+            </div>
+            <script>
+              const token=document.getElementById('token');
+              const pass=document.getElementById('vncpass');
+              const badge=document.getElementById('badge');
+              const box=document.getElementById('status');
+              const frame=document.getElementById('remote');
+              token.value=sessionStorage.getItem('recordToken')||'';
+              pass.value=sessionStorage.getItem('vncPassword')||'';
+              token.oninput=()=>sessionStorage.setItem('recordToken',token.value.trim());
+              pass.oninput=()=>sessionStorage.setItem('vncPassword',pass.value.trim());
+              function headers(){const t=token.value.trim();if(!t)throw new Error('ضع Recording API Token من GitHub Actions Summary.');return {'Authorization':'Bearer '+t};}
+              async function api(path,method='GET'){const r=await fetch(path,{method,headers:headers(),cache:'no-store'});let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;}
+              function render(d){badge.textContent=(d.status||'UNKNOWN').toUpperCase();badge.className='badge '+(d.status==='recording'?'bad':d.status==='completed'?'ok':'');box.textContent=JSON.stringify(d,null,2);}
+              async function refresh(){try{render(await api('/api/status'))}catch(e){box.textContent=e.message}}
+              async function startRecording(){try{render(await api('/api/record/start','POST'))}catch(e){alert(e.message);await refresh()}}
+              async function stopRecording(){try{box.textContent='Finalizing MP4...';render(await api('/api/record/stop','POST'))}catch(e){alert(e.message);await refresh()}}
+              function openRemote(){const p=pass.value.trim();frame.src='/vnc.html?autoconnect=true&resize=scale&path=websockify'+(p?'&password='+encodeURIComponent(p):'')}
+              function reloadRemote(){frame.src='/vnc.html?autoconnect=true&resize=scale&path=websockify'}
+              refresh();setInterval(refresh,3000);
+            </script>
           </body>
           </html>
           HTML
 
-          # ========================================================
-          # NGINX CONFIGURATION
-          # ========================================================
-          cat > "$NGINX_CONF" <<EOF
-          worker_processes 1;
+      - name: Start Recording API
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          events {
-              worker_connections 1024;
-          }
+          RECORD_API_TOKEN="$(openssl rand -hex 32)"
+          echo "RECORD_API_TOKEN=$RECORD_API_TOKEN" >> "$GITHUB_ENV"
 
-          http {
+          nohup env \
+            DISPLAY="$DISPLAY" \
+            WIDTH="$WIDTH" \
+            HEIGHT="$HEIGHT" \
+            FPS="$FPS" \
+            RECORDING_FILE="$RECORDING_FILE" \
+            RECORD_API_TOKEN="$RECORD_API_TOKEN" \
+            python3 /tmp/saas-recorder/server.py \
+            > /tmp/saas-recorder/api.log 2>&1 < /dev/null &
 
-              include /etc/nginx/mime.types;
+          echo $! > /tmp/saas-recorder/api.pid
+          sleep 3
+          curl -fsS http://127.0.0.1:8090/api/health
 
-              sendfile on;
+      - name: Configure Local Gateway
+        shell: bash
+        run: |
+          set -euo pipefail
 
-              map \$http_upgrade \$connection_upgrade {
-                  default upgrade;
-                  '' close;
+          sudo rm -f /etc/nginx/sites-enabled/default
+
+          sudo tee /etc/nginx/sites-available/saas-recorder >/dev/null <<'NGINX'
+          server {
+              listen 8080;
+              server_name _;
+              client_max_body_size 2g;
+
+              location /api/ {
+                  proxy_pass http://127.0.0.1:8090;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_read_timeout 120s;
               }
 
-              server {
+              location = /control.html {
+                  alias /opt/saas-recorder/control.html;
+                  default_type text/html;
+              }
 
-                  listen 8080;
-                  server_name _;
+              location = / {
+                  return 302 /control.html;
+              }
 
-                  client_max_body_size 100M;
+              location /websockify {
+                  proxy_pass http://127.0.0.1:6080;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_read_timeout 86400;
+              }
 
-                  location / {
-                      root /tmp/recording-studio;
-                      index index.html;
-                      try_files \$uri \$uri/ /index.html;
-                  }
-
-                  location /api/ {
-                      proxy_pass http://127.0.0.1:8081;
-
-                      proxy_http_version 1.1;
-
-                      proxy_set_header Host \$host;
-                      proxy_set_header X-Real-IP \$remote_addr;
-                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-
-                      proxy_read_timeout 3600;
-                      proxy_send_timeout 3600;
-                  }
-
-                  location /vnc/ {
-                      alias /usr/share/novnc/;
-                      index vnc.html;
-                  }
-
-                  location /app/ {
-                      alias /usr/share/novnc/app/;
-                  }
-
-                  location /core/ {
-                      alias /usr/share/novnc/core/;
-                  }
-
-                  location /vendor/ {
-                      alias /usr/share/novnc/vendor/;
-                  }
-
-                  location /websockify {
-
-                      proxy_pass http://127.0.0.1:6080;
-
-                      proxy_http_version 1.1;
-
-                      proxy_set_header Upgrade \$http_upgrade;
-                      proxy_set_header Connection \$connection_upgrade;
-
-                      proxy_set_header Host \$host;
-
-                      proxy_read_timeout 3600;
-                      proxy_send_timeout 3600;
-                  }
+              location / {
+                  proxy_pass http://127.0.0.1:6080;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_read_timeout 86400;
               }
           }
-          EOF
+          NGINX
 
-          # ========================================================
-          # START CONTROLLER
-          # ========================================================
-          echo ""
-          echo "Starting recording controller..."
-
-          python3 "$CONTROLLER" \
-            > /tmp/recording-studio/controller.log 2>&1 &
-
-          CONTROLLER_PID=$!
-
+          sudo ln -sf /etc/nginx/sites-available/saas-recorder /etc/nginx/sites-enabled/saas-recorder
+          sudo nginx -t
+          sudo systemctl restart nginx
           sleep 2
+          curl -fsS http://127.0.0.1:8080/control.html >/dev/null
 
-          # ========================================================
-          # START NGINX
-          # ========================================================
-          echo ""
-          echo "Starting nginx..."
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          sudo nginx \
-            -c "$NGINX_CONF" \
-            -p /tmp/recording-studio \
-            > /tmp/recording-studio/nginx.log 2>&1
+          wget -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -O /tmp/cloudflared.deb
 
-          sleep 2
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get install -f -y
+          cloudflared --version
 
-          # ========================================================
-          # START CLOUDFLARED
-          # ========================================================
-          echo ""
-          echo "Starting Cloudflare Quick Tunnel..."
-
-          cloudflared tunnel \
+          nohup cloudflared tunnel \
             --no-autoupdate \
             --url http://127.0.0.1:8080 \
-            > "$CLOUDFLARED_LOG" 2>&1 &
+            > /tmp/saas-recorder/cloudflared.log 2>&1 < /dev/null &
 
-          CLOUDFLARED_PID=$!
+          echo $! > /tmp/saas-recorder/cloudflared.pid
 
-          # ========================================================
-          # WAIT FOR CLOUDFLARE URL
-          # ========================================================
-          echo ""
-          echo "Waiting for Cloudflare tunnel..."
-
-          PUBLIC_URL=""
-
+          REMOTE_URL=""
           for i in $(seq 1 60); do
-
-            if grep -Eo \
-              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-              "$CLOUDFLARED_LOG" \
-              >/tmp/recording-studio/url.txt 2>/dev/null; then
-
-              PUBLIC_URL="$(head -n 1 /tmp/recording-studio/url.txt)"
-
-              if [ -n "$PUBLIC_URL" ]; then
-                break
-              fi
-            fi
-
-            sleep 2
+            REMOTE_URL="$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/saas-recorder/cloudflared.log | head -n 1 || true)"
+            if [ -n "$REMOTE_URL" ]; then break; fi
+            sleep 1
           done
 
-          if [ -z "$PUBLIC_URL" ]; then
-            echo "ERROR: Cloudflare tunnel URL was not found."
-            cat "$CLOUDFLARED_LOG" || true
+          if [ -z "$REMOTE_URL" ]; then
+            cat /tmp/saas-recorder/cloudflared.log
             exit 1
           fi
 
-          # ========================================================
-          # GITHUB SUMMARY
-          # ========================================================
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          echo "REMOTE_URL=$REMOTE_URL" >> "$GITHUB_ENV"
 
-          # 🎬 Recording Studio
-
-          ## 🌐 Remote Control
-
-          **Open this URL in your browser:**
-
-          ${PUBLIC_URL}
-
-          ## 🎥 Recording Controls
-
-          1. Open the URL above.
-          2. Use the embedded Remote Desktop to control Chromium.
-          3. Press **START RECORDING**.
-          4. Perform your complete SaaS demonstration.
-          5. Press **STOP & SAVE**.
-          6. Wait for the MP4 to be finalized.
-          7. The finished MP4 will be uploaded as a GitHub Artifact.
-
-          ## 🖥️ Display
-
-          | Setting | Value |
-          |---|---|
-          | Resolution | ${WIDTH} × ${HEIGHT} |
-          | FPS | ${FPS} |
-          | Browser Scale | 1.25 |
-          | X11 DPI | 120 |
-          | Video | H.264 |
-          | CRF | 15 |
-          | Capture | Direct X11 |
-          | Remote Control | noVNC |
-          | Tunnel | Cloudflare Quick Tunnel |
-
-          ## 🔐 VNC Password
-
-          \`${VNC_PASSWORD}\`
-
-          ## 🔑 API Session Token
-
-          \`${SESSION_TOKEN}\`
-
-          EOF
-
-          echo ""
+          echo
           echo "============================================================"
-          echo "             RECORDING STUDIO IS READY"
+          echo "REMOTE CONTROL PANEL"
+          echo "$REMOTE_URL/control.html"
           echo "============================================================"
-          echo ""
-          echo "PUBLIC URL:"
-          echo "$PUBLIC_URL"
-          echo ""
-          echo "VNC PASSWORD:"
+          echo "DIRECT NOVNC"
+          echo "$REMOTE_URL/vnc.html?autoconnect=true&resize=scale&path=websockify"
+          echo "============================================================"
+          echo "RECORDING API TOKEN"
+          echo "$RECORD_API_TOKEN"
+          echo "============================================================"
+          echo "VNC PASSWORD"
           echo "$VNC_PASSWORD"
-          echo ""
-          echo "SESSION TOKEN:"
-          echo "$SESSION_TOKEN"
-          echo ""
-          echo "Resolution: ${WIDTH}x${HEIGHT}"
-          echo "FPS:        ${FPS}"
-          echo "Scale:      1.25"
-          echo "DPI:        120"
-          echo ""
           echo "============================================================"
-          echo ""
-          echo "Open the URL and control the virtual computer."
-          echo "Press START RECORDING when ready."
-          echo "Press STOP & SAVE when finished."
-          echo ""
 
-          # ========================================================
-          # CLEANUP FUNCTION
-          # ========================================================
-          cleanup() {
+          {
+            echo "# 🎥 SaaS Recording Session"
+            echo
+            echo "## Remote Control Panel"
+            echo
+            echo "$REMOTE_URL/control.html"
+            echo
+            echo "## Direct noVNC"
+            echo
+            echo "$REMOTE_URL/vnc.html?autoconnect=true&resize=scale&path=websockify"
+            echo
+            echo "## Recording API Token"
+            echo
+            echo "\`$RECORD_API_TOKEN\`"
+            echo
+            echo "## VNC Password"
+            echo
+            echo "\`$VNC_PASSWORD\`"
+            echo
+            echo "## SaaS Site"
+            echo
+            echo "$SITE_URL"
+            echo
+            echo "## Capture"
+            echo
+            echo "${WIDTH} × ${HEIGHT} @ ${FPS} FPS"
+            echo "Mouse cursor target: ${XCURSOR_SIZE}px"
+            echo "Video: H.264 High / yuv420p / MP4"
+            echo
+            echo "## Recording API"
+            echo
+            echo "GET  $REMOTE_URL/api/status"
+            echo "POST $REMOTE_URL/api/record/start"
+            echo "POST $REMOTE_URL/api/record/stop"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-            echo ""
-            echo "Cleaning up recording environment..."
+      - name: Wait For START And STOP
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            if [ -n "${CONTROLLER_PID:-}" ]; then
-              kill "$CONTROLLER_PID" 2>/dev/null || true
+          TOTAL_SECONDS=$((SESSION_MINUTES * 60))
+          START_TIME="$(date +%s)"
+
+          echo "============================================================"
+          echo "SESSION READY"
+          echo "Open: $REMOTE_URL/control.html"
+          echo "Press START only when the recording should begin."
+          echo "Press STOP only when the recording should end."
+          echo "Safety session limit: ${SESSION_MINUTES} minutes."
+          echo "============================================================"
+
+          while true; do
+            JSON="$(curl -fsS -H "Authorization: Bearer ${RECORD_API_TOKEN}" http://127.0.0.1:8090/api/status)"
+            echo "$JSON"
+
+            STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unknown"))' <<< "$JSON")"
+
+            if [ "$STATUS" = "completed" ]; then
+              echo "Recording completed by STOP command."
+              break
             fi
 
-            if [ -n "${CLOUDFLARED_PID:-}" ]; then
-              kill "$CLOUDFLARED_PID" 2>/dev/null || true
+            if [ "$STATUS" = "failed" ]; then
+              echo "Recording API reported failure."
+              exit 1
             fi
 
-            sudo nginx \
-              -c "$NGINX_CONF" \
-              -p /tmp/recording-studio \
-              -s stop \
-              2>/dev/null || true
-
-            if [ -n "${WEBSOCKIFY_PID:-}" ]; then
-              kill "$WEBSOCKIFY_PID" 2>/dev/null || true
+            NOW="$(date +%s)"
+            if [ $((NOW - START_TIME)) -ge "$TOTAL_SECONDS" ]; then
+              echo "Safety session limit reached."
+              echo "Attempting graceful STOP if recording is active."
+              curl -fsS -X POST \
+                -H "Authorization: Bearer ${RECORD_API_TOKEN}" \
+                http://127.0.0.1:8090/api/record/stop || true
+              break
             fi
 
-            if [ -n "${X11VNC_PID:-}" ]; then
-              kill "$X11VNC_PID" 2>/dev/null || true
-            fi
-
-            if [ -n "${CHROME_PID:-}" ]; then
-              kill "$CHROME_PID" 2>/dev/null || true
-            fi
-
-            if [ -n "${XVFB_PID:-}" ]; then
-              kill "$XVFB_PID" 2>/dev/null || true
-            fi
-
-            echo "Cleanup complete."
-          }
-
-          trap cleanup EXIT
-
-          # ========================================================
-          # WAIT UNTIL STOP & SAVE
-          # ========================================================
-          while kill -0 "$CONTROLLER_PID" 2>/dev/null; do
-            sleep 2
+            sleep 3
           done
 
-          echo ""
-          echo "Recording controller finished."
+      - name: Verify Final MP4
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          if [ -f "$STATE_FILE" ]; then
-            echo ""
-            echo "Final state:"
-            cat "$STATE_FILE"
+          if [ ! -f "$RECORDING_FILE" ]; then
+            echo "No recording file found."
+            exit 1
           fi
 
-          if [ -f "$RECORDING_FILE" ]; then
-
-            echo ""
-            echo "Final video found:"
-            ls -lh "$RECORDING_FILE"
-
-            echo ""
-            echo "Video information:"
-
-            ffprobe \
-              -v error \
-              -show_entries \
-              format=duration,size \
-              -show_entries \
-              stream=codec_name,width,height,r_frame_rate \
-              -of default=noprint_wrappers=1 \
-              "$RECORDING_FILE" || true
-
-          else
-
-            echo ""
-            echo "WARNING: No recording file was created."
-
+          SIZE="$(stat -c%s "$RECORDING_FILE")"
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "Recording file is unexpectedly small: $SIZE bytes"
+            exit 1
           fi
 
-      # ============================================================
-      # 3. UPLOAD FINAL MP4
-      # ============================================================
-      - name: Upload recording
+          echo "========== FINAL VIDEO =========="
+          ffprobe \
+            -v error \
+            -select_streams v:0 \
+            -show_entries stream=codec_name,profile,level,width,height,avg_frame_rate,pix_fmt,duration \
+            -of default=noprint_wrappers=1 \
+            "$RECORDING_FILE"
+
+          echo
+          ls -lh "$RECORDING_FILE"
+
+      - name: Upload Final Video
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SaaS-Demo-Recording
-          path: /tmp/recordings/saas-demo.mp4
-          if-no-files-found: warn
+          name: saas-demo-recording
+          path: recording.mp4
+          if-no-files-found: ignore
           retention-days: 7
 
-      # ============================================================
-      # 4. UPLOAD DEBUG LOGS
-      # ============================================================
-      - name: Upload debug logs
+      - name: Upload Font Diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Recording-Studio-Logs
+          name: browser-font-diagnostics
           path: |
-            /tmp/recording-studio/*.log
-            /tmp/recording-studio/state.json
-            /tmp/recording-studio/*.txt
+            /tmp/saas-recorder/font-diagnostics.json
+            diagnostic-before-recording.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Runtime Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recorder-logs
+          path: /tmp/saas-recorder/
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          if [ -f /tmp/saas-recorder/api.pid ]; then kill "$(cat /tmp/saas-recorder/api.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/saas-recorder/cloudflared.pid ]; then kill "$(cat /tmp/saas-recorder/cloudflared.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/saas-recorder/novnc.pid ]; then kill "$(cat /tmp/saas-recorder/novnc.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/saas-recorder/x11vnc.pid ]; then kill "$(cat /tmp/saas-recorder/x11vnc.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/saas-recorder/chromium.pid ]; then kill "$(cat /tmp/saas-recorder/chromium.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/saas-recorder/xvfb.pid ]; then kill "$(cat /tmp/saas-recorder/xvfb.pid)" 2>/dev/null || true; fi
+
+          pkill -f ffmpeg 2>/dev/null || true
+          pkill -f cloudflared 2>/dev/null || true
+          pkill -f websockify 2>/dev/null || true
+          pkill -f x11vnc 2>/dev/null || true
+          pkill -f chromium 2>/dev/null || true
+          pkill -f Xvfb 2>/dev/null || true
+
+          echo "Cleanup complete."
